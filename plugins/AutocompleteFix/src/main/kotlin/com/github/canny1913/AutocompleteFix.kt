@@ -61,13 +61,12 @@ class AutocompletableComparator : Comparator<Autocompletable> {
         }
 
         return when {
-            // حل مشكلة خيارات الـ Slash Commands للرتب والخيارات المكررة
             check<ApplicationCommandChoiceAutocompletable>(a, b) -> {
                 compareValuesBy(
                     a, b,
-                    { it.choice.a().lowercase() }, // الاسم الظاهر
-                    { it.choice.b()?.toString() },  // القيمة الفعلية (Role ID) المخزنة في CommandChoice
-                    { System.identityHashCode(it) } // ضمان عدم التطابق تحت أي ظرف
+                    { it.choice.a().lowercase() },
+                    { it.choice.b()?.toString() },
+                    { System.identityHashCode(it) }
                 )
             }
 
@@ -104,6 +103,44 @@ class AutocompletableComparator : Comparator<Autocompletable> {
                 compareValuesBy(
                     a, b,
                     { it.text.lowercase() },
+                    { System.identityHashCode(it) }
+                )
+            }
+
+            check<RoleAutocompletable>(a, b) -> {
+                compareValuesBy(
+                    a, b,
+                    { it.role.name.lowercase() },
+                    { it.role.id }
+                )
+            }
+
+            check<UserAutocompletable>(a, b) -> {
+                compareValuesBy(
+                    a, b,
+                    { (it.nickname ?: it.user.username).lowercase() },
+                    { it.user.username.lowercase() },
+                    { it.user.discriminator },
+                    { it.user.id }
+                )
+            }
+
+            check<ApplicationCommandLoadingPlaceholder>(a, b) -> 0
+            check<EmojiUpsellPlaceholder>(a, b) -> 0
+
+            else -> throw NoWhenBranchMatchedException()
+        }
+    }
+
+    @OptIn(ExperimentalContracts::class)
+    private inline fun <reified T : Autocompletable> check(a: Autocompletable, b: Autocompletable): Boolean {
+        contract {
+            returns(true) implies (a is T)
+            returns(true) implies (b is T)
+        }
+        return a is T
+    }
+}
                     { System.identityHashCode(it) }
                 )
             }
