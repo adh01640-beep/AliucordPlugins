@@ -4,140 +4,120 @@ import android.content.Context
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.after
-import com.aliucord.utils.ChannelUtils
-import com.aliucord.utils.accessField
-import com.aliucord.wrappers.ChannelWrapper.Companion.id
-import com.aliucord.wrappers.GuildRoleWrapper.Companion.name
-import com.discord.widgets.chat.input.autocomplete.ApplicationCommandAutocompletable
+import com.aliucord.patcher.instead
+import com.discord.api.commands.CommandChoice
 import com.discord.widgets.chat.input.autocomplete.ApplicationCommandChoiceAutocompletable
-import com.discord.widgets.chat.input.autocomplete.ApplicationCommandLoadingPlaceholder
-import com.discord.widgets.chat.input.autocomplete.ApplicationPlaceholder
 import com.discord.widgets.chat.input.autocomplete.Autocompletable
-import com.discord.widgets.chat.input.autocomplete.AutocompletableKt
-import com.discord.widgets.chat.input.autocomplete.ChannelAutocompletable
-import com.discord.widgets.chat.input.autocomplete.`ChatInputAutocompletables$observeChannelAutocompletables$1$1`
-import com.discord.widgets.chat.input.autocomplete.EmojiAutocompletable
-import com.discord.widgets.chat.input.autocomplete.EmojiUpsellPlaceholder
-import com.discord.widgets.chat.input.autocomplete.GlobalRoleAutocompletable
 import com.discord.widgets.chat.input.autocomplete.RoleAutocompletable
 import com.discord.widgets.chat.input.autocomplete.UserAutocompletable
-import java.util.TreeMap
-import java.util.TreeSet
-import kotlin.contracts.ExperimentalContracts
-import kotlin.contracts.contract
+import java.lang.reflect.Field
+import java.util.*
 
-@AliucordPlugin(
-    requiresRestart = true
-)
+@AliucordPlugin(requiresRestart = true)
 class AutocompleteFix : Plugin() {
 
-    private var TreeSet<*>.map by accessField<TreeMap<*, *>>("m")
-    private var TreeMap<*, *>.comparator by accessField<Comparator<*>>()
-
     override fun start(context: Context) {
-        patcher.after<`ChatInputAutocompletables$observeChannelAutocompletables$1$1`<*, *, *, *, *>>(
-            "call",
-            Map::class.java,
-            Map::class.java,
-            Map::class.java,
-            Map::class.java
-        ) { param ->
-            val result = param.result as Map<*, TreeSet<Autocompletable>>
-            result.keys.forEach {
-                val treeSet = result[it] ?: return@forEach
-                treeSet.map.comparator = AutocompletableComparator()
+        patchChatAutocomplete()
+        patchSlashChoices()
+    }
+
+    /**
+     * معالجة منشن الشات العادي (المستخدمين والرتب)
+     */
+    private fun patchChatAutocomplete() {
+        try {
+            // هوك على دالة معالجة الـ Autocomplete للشات
+            patcher.after<Any>(
+                "com.discord.widgets.chat.input.autocomplete.ChatInputAutocompletables\$observeChannelAutocompletables\$1\$1",
+                "call",
+                Map::class.java,
+                Map::class.java,
+                Map::class.java,
+                Map::class.java
+            ) { param ->
+                val resultMap = param.result as? Map<*, *> ?: return@after
+
+                for (value in resultMap.values) {
+                    if (value is TreeSet<*>) {
+                        @Suppress("UNCHECKED_CAST")
+                        val treeSet = value as TreeSet<Autocompletable>
+                        injectNonCollidingComparator(treeSet)
+                    }
+                }
             }
+        } catch (e: Throwable) {
+            logger.error("Error patching chat autocomplete", e)
         }
     }
 
-    override fun stop(context: Context) = patcher.unpatchAll()
-}
-
-@Suppress("unused")
-class AutocompletableComparator : Comparator<Autocompletable> {
-    override fun compare(a: Autocompletable, b: Autocompletable): Int {
-        if (a::class != b::class) {
-            return AutocompletableKt.getSortIndex(a).compareTo(AutocompletableKt.getSortIndex(b))
-        }
-
-        return when {
-            check<ApplicationCommandChoiceAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { it.choice.a().lowercase() },
-                    { it.choice.b()?.toString() },
-                    { System.identityHashCode(it) }
-                )
+    /**
+     * معالجة خيارات السلاش (Slash Command Choices) المتطابقة في الاسم
+     */
+    private fun patchSlashChoices() {
+        try {
+            // هوك على دالة استخراج اسم الخيار لمنع دمج الرتب/المستخدمين في خيارات السلاش
+            patcher.after<CommandChoice>(
+                CommandChoice::class.java,
+                "a" // دالة getName() داخل موديل CommandChoice
+            ) { param ->
+                val originalName = param.result as? String ?: return@after
+                val choice = param.thisObject as? CommandChoice ?: return@after
+                
+                // استخراج القيمة (التي تحمل الـ ID في أوامر الرتب والمستخدمين)
+                val value = choice.b()?.toString() // دالة getValue()
+                if (value != null && value.length >= 4 && value.all { it.isDigit() }) {
+                    // إضافة تمييز فريد غير مرئي أو واضح عند تطابق الأسماء
+                    // نضع آخر 4 أرقام من الـ ID بين قوسين للتفريق بين الخيارات المتشابهة
+                    val suffix = " (#${value.takeLast(4)})"
+                    if (!originalName.endsWith(")")) {
+                        param.result = originalName + suffix
+                    }
+                }
             }
-
-            check<ApplicationCommandAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { it.command.name },
-                    { it.application?.id },
-                    { System.identityHashCode(it) }
-                )
-            }
-
-            check<ApplicationPlaceholder>(a, b) -> {
-                compareValuesBy(a, b) { it.application.name.lowercase() }
-            }
-
-            check<ChannelAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { ChannelUtils.getDisplayName(it.channel).lowercase() },
-                    { it.channel.id }
-                )
-            }
-
-            check<EmojiAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { it.emoji.firstName },
-                    { System.identityHashCode(it) }
-                )
-            }
-
-            check<GlobalRoleAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { it.text.lowercase() },
-                    { System.identityHashCode(it) }
-                )
-            }
-
-            check<RoleAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { it.role.name.lowercase() },
-                    { it.role.id }
-                )
-            }
-
-            check<UserAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { (it.nickname ?: it.user.username).lowercase() },
-                    { it.user.username.lowercase() },
-                    { it.user.discriminator },
-                    { it.user.id }
-                )
-            }
-
-            check<ApplicationCommandLoadingPlaceholder>(a, b) -> 0
-            check<EmojiUpsellPlaceholder>(a, b) -> 0
-
-            else -> throw NoWhenBranchMatchedException()
+        } catch (e: Throwable) {
+            logger.error("Error patching slash command choices", e)
         }
     }
 
-    @OptIn(ExperimentalContracts::class)
-    private inline fun <reified T : Autocompletable> check(a: Autocompletable, b: Autocompletable): Boolean {
-        contract {
-            returns(true) implies (a is T)
-            returns(true) implies (b is T)
-        }
-        return a is T
+    /**
+     * استبدال المقارن بمقارن يمنع تماماً حذف أي عنصر مهما تشابه
+     */
+    private fun injectNonCollidingComparator(set: TreeSet<Autocompletable>) {
+        try {
+            val mField: Field = TreeSet::class.java.getDeclaredField("m").apply { isAccessible = true }
+            val treeMap = mField.get(set) as? TreeMap<*, *> ?: return
+
+            val compField: Field = TreeMap::class.java.getDeclaredField("comparator").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val baseComparator = compField.get(treeMap) as? Comparator<Autocompletable>
+
+            val safeComparator = Comparator<Autocompletable> { a, b ->
+                if (a === b) return@Comparator 0
+                val res = baseComparator?.compare(a, b) ?: 0
+                if (res != 0) return@Comparator res
+
+                // كسر التعادل للمستخدمين
+                if (a is UserAutocompletable && b is UserAutocompletable) {
+                    val idCmp = a.user.id.compareTo(b.user.id)
+                    if (idCmp != 0) return@Comparator idCmp
+                }
+
+                // كسر التعادل للرتب
+                if (a is RoleAutocompletable && b is RoleAutocompletable) {
+                    val roleIdCmp = a.role.id.compareTo(b.role.id)
+                    if (roleIdCmp != 0) return@Comparator roleIdCmp
+                }
+
+                // كسر التعادل لأي كائنين آخرين
+                System.identityHashCode(a).compareTo(System.identityHashCode(b))
+            }
+
+            compField.set(treeMap, safeComparator)
+        } catch (ignored: Throwable) {}
+    }
+
+    override fun stop(context: Context) {
+        patcher.unpatchAll()
     }
 }
+
