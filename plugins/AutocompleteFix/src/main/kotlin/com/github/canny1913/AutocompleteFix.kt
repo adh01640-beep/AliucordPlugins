@@ -61,15 +61,22 @@ class AutocompletableComparator : Comparator<Autocompletable> {
         }
 
         return when {
+            // حل مشكلة خيارات الـ Slash Commands للرتب والخيارات المكررة
             check<ApplicationCommandChoiceAutocompletable>(a, b) -> {
-                compareValuesBy(a, b) { it.choice.a().lowercase() }
+                compareValuesBy(
+                    a, b,
+                    { it.choice.a().lowercase() }, // الاسم الظاهر
+                    { it.choice.b()?.toString() },  // القيمة الفعلية (Role ID) المخزنة في CommandChoice
+                    { System.identityHashCode(it) } // ضمان عدم التطابق تحت أي ظرف
+                )
             }
 
             check<ApplicationCommandAutocompletable>(a, b) -> {
                 compareValuesBy(
                     a, b,
                     { it.command.name },
-                    { it.application?.id }
+                    { it.application?.id },
+                    { System.identityHashCode(it) }
                 )
             }
 
@@ -86,7 +93,11 @@ class AutocompletableComparator : Comparator<Autocompletable> {
             }
 
             check<EmojiAutocompletable>(a, b) -> {
-                compareValuesBy(a, b) { it.emoji.firstName }
+                compareValuesBy(
+                    a, b,
+                    { it.emoji.firstName },
+                    { System.identityHashCode(it) }
+                )
             }
 
             check<GlobalRoleAutocompletable>(a, b) -> {
@@ -97,6 +108,7 @@ class AutocompletableComparator : Comparator<Autocompletable> {
                 )
             }
 
+            // حل مشكلة منشن الرتب العادية (@Role) في الشات
             check<RoleAutocompletable>(a, b) -> {
                 compareValuesBy(
                     a, b,
@@ -104,6 +116,34 @@ class AutocompletableComparator : Comparator<Autocompletable> {
                     { it.role.id }
                 )
             }
+
+            // حل مشكلة منشن الحسابات المتطابقة في الشات (@User)
+            check<UserAutocompletable>(a, b) -> {
+                compareValuesBy(
+                    a, b,
+                    { (it.nickname ?: it.user.username).lowercase() },
+                    { it.user.username.lowercase() },
+                    { it.user.discriminator },
+                    { it.user.id }
+                )
+            }
+
+            check<ApplicationCommandLoadingPlaceholder>(a, b) -> 0
+            check<EmojiUpsellPlaceholder>(a, b) -> 0
+
+            else -> throw NoWhenBranchMatchedException()
+        }
+    }
+
+    @OptIn(ExperimentalContracts::class)
+    private inline fun <reified T : Autocompletable> check(a: Autocompletable, b: Autocompletable): Boolean {
+        contract {
+            returns(true) implies (a is T)
+            returns(true) implies (b is T)
+        }
+        return a is T
+    }
+}
 
             check<UserAutocompletable>(a, b) -> {
                 compareValuesBy(
