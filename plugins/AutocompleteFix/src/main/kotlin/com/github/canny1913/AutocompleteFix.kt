@@ -69,7 +69,7 @@ class AutocompletableComparator : Comparator<Autocompletable> {
                 compareValuesBy(
                     a, b,
                     { it.command.name },
-                    { it.application?.id },
+                    { it.application?.id }
                 )
             }
 
@@ -81,7 +81,7 @@ class AutocompletableComparator : Comparator<Autocompletable> {
                 compareValuesBy(
                     a, b,
                     { ChannelUtils.getDisplayName(it.channel).lowercase() },
-                    { it.channel.id },
+                    { it.channel.id }
                 )
             }
 
@@ -93,17 +93,15 @@ class AutocompletableComparator : Comparator<Autocompletable> {
                 compareValuesBy(
                     a, b,
                     { it.text.lowercase() },
-                    { System.identityHashCode(it) } // يمنع إخفاء أي عنصر عام مكرر
+                    { System.identityHashCode(it) }
                 )
             }
 
-            // إصلاح الرتب: الترتيب حسب ترتيب الرتبة (Position) أولاً، ثم الاسم، وأخيراً الـ Role ID الصريح
             check<RoleAutocompletable>(a, b) -> {
                 compareValuesBy(
                     a, b,
-                    { -it.role.position }, // الرتب الأعلى تظهر أولاً
                     { it.role.name.lowercase() },
-                    { it.role.id } // Tie-breaker صريح برقم الـ ID لعدم حذف أي رتبة بنفس الاسم
+                    { it.role.id }
                 )
             }
 
@@ -113,37 +111,7 @@ class AutocompletableComparator : Comparator<Autocompletable> {
                     { (it.nickname ?: it.user.username).lowercase() },
                     { it.user.username.lowercase() },
                     { it.user.discriminator },
-                    { it.user.id } // Tie-breaker للمستخدمين
-                )
-            }
-
-            check<ApplicationCommandLoadingPlaceholder>(a, b) -> 0
-            check<EmojiUpsellPlaceholder>(a, b) -> 0
-
-            else -> throw NoWhenBranchMatchedException()
-        }
-    }
-
-    @OptIn(ExperimentalContracts::class)
-    private inline fun <reified T : Autocompletable> check(a: Autocompletable, b: Autocompletable): Boolean {
-        contract {
-            returns(true) implies (a is T)
-            returns(true) implies (b is T)
-        }
-        return a is T
-    }
-}
-                    { it.role.id } // *New*: additionally compare by id
-                )
-            }
-
-            // *New*: replace default username#discrim comparison
-            check<UserAutocompletable>(a, b) -> {
-                compareValuesBy(
-                    a, b,
-                    { (it.nickname ?: it.user.username).lowercase() }, // Compare by nickname/display name first
-                    { it.user.username.lowercase() }, // Then compare by username
-                    { it.user.discriminator }, // Then compare by discrim
+                    { it.user.id }
                 )
             }
 
