@@ -1,19 +1,12 @@
-package com.aliucord.plugins;
+package com.aliucord.plugins
 
-import android.content.Context;
-
-import com.aliucord.Logger;
-import com.aliucord.annotations.AliucordPlugin;
-import com.aliucord.entities.Plugin;
-import com.aliucord.patcher.PatcherKt;
-
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import android.content.Context
+import com.aliucord.Logger
+import com.aliucord.annotations.AliucordPlugin
+import com.aliucord.entities.Plugin
+import com.aliucord.patcher.after
+import com.aliucord.patcher.instead
+import java.lang.reflect.Method
 
 /**
  * MentionDedupeFix
@@ -43,7 +36,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * بما أن createAutocompletablesForUsers/ForDmUsers تُرجعان Map (وليس List)،
  * فإن أي تصادم في المفتاح الداخلي المستخدم لبناء هذا الـ Map (لو كان مبنياً
  * على نص/اسم بدل معرف فريد) سيؤدي حرفياً إلى استبدال أحد العناصر بالآخر
- * عبر Map.put() — وهو نفس العرض الذي وصفته بالضبط (اختفاء تام لا يظهر
+ * عبر put() — وهو نفس العرض الذي وصفته بالضبط (اختفاء تام لا يظهر
  * حتى في القائمة، وليس فقط بصرياً).
  *
  * بما أنني لا أملك تفكيك (decompile) لجسم الدالة بالكامل (bytecode logic)،
@@ -56,101 +49,92 @@ import java.util.concurrent.atomic.AtomicLong;
  *      الحقيقي بدل أي قيمة قد تتصادم بصرياً بين عنصرين متشابهي الاسم.
  */
 @AliucordPlugin
-public class MentionDedupeFix extends Plugin {
+class MentionDedupeFix : Plugin() {
 
-    private static final Logger LOG = new Logger("MentionDedupeFix");
+    companion object {
+        private val LOG = Logger("MentionDedupeFix")
 
-    private static final String SOURCE_CLASS =
-        "com.discord.widgets.chat.input.autocomplete.sources.UserAutocompletableSource";
-    private static final String USER_AUTOCOMPLETABLE_CLASS =
-        "com.discord.widgets.chat.input.autocomplete.UserAutocompletable";
-    private static final String ADAPTER_CLASS =
-        "com.discord.widgets.chat.input.autocomplete.adapter.ChatInputAutocompleteAdapter";
-    private static final String AUTOCOMPLETABLE_INTERFACE =
-        "com.discord.widgets.chat.input.autocomplete.Autocompletable";
+        private const val SOURCE_CLASS =
+            "com.discord.widgets.chat.input.autocomplete.sources.UserAutocompletableSource"
+        private const val ADAPTER_CLASS =
+            "com.discord.widgets.chat.input.autocomplete.adapter.ChatInputAutocompleteAdapter"
+    }
 
-    private final List<Runnable> unhooks = new ArrayList<>();
-
-    @Override
-    public void start(Context context) {
+    override fun start(context: Context) {
         try {
-            patchUserAutocompletableSource();
-        } catch (Throwable t) {
-            LOG.error("فشل ربط UserAutocompletableSource", t);
+            patchUserAutocompletableSource()
+        } catch (t: Throwable) {
+            LOG.error("فشل ربط UserAutocompletableSource", t)
         }
 
         try {
-            patchAdapterStableIds();
-        } catch (Throwable t) {
-            LOG.error("فشل ربط ChatInputAutocompleteAdapter.getItemId", t);
+            patchAdapterStableIds()
+        } catch (t: Throwable) {
+            LOG.error("فشل ربط ChatInputAutocompleteAdapter.getItemId", t)
         }
     }
 
-    @Override
-    public void stop(Context context) {
-        for (Runnable r : unhooks) {
-            try { r.run(); } catch (Throwable ignored) {}
-        }
-        unhooks.clear();
+    override fun stop(context: Context) {
+        patcher.unpatchAll()
     }
 
     // =====================================================================
     // 1) UserAutocompletableSource: الإصلاح الرئيسي
     // =====================================================================
 
-    @SuppressWarnings("unchecked")
-    private void patchUserAutocompletableSource() throws Exception {
-        Class<?> sourceClass = Class.forName(SOURCE_CLASS);
+    private fun patchUserAutocompletableSource() {
+        val sourceClass = Class.forName(SOURCE_CLASS)
 
-        for (String methodName : new String[]{
-                "createAutocompletablesForUsers",
-                "createAutocompletablesForDmUsers"
-        }) {
-            Method target = findMethodByName(sourceClass, methodName);
+        for (methodName in arrayOf(
+            "createAutocompletablesForUsers",
+            "createAutocompletablesForDmUsers"
+        )) {
+            val target = findMethodByName(sourceClass, methodName)
             if (target == null) {
-                LOG.warn("لم يتم العثور على الدالة: " + methodName + " — راجع الاسم في نسختك.");
-                continue;
+                LOG.warn("لم يتم العثور على الدالة: $methodName — راجع الاسم في نسختك.")
+                continue
             }
-            target.setAccessible(true);
+            target.isAccessible = true
+            LOG.info("تم العثور على: $target")
 
-            LOG.info("تم العثور على: " + target);
-
-            Object unhook = PatcherKt.after(target, param -> {
+            patcher.after<Any?>(target) { param ->
                 try {
-                    Object rawResult = param.getResult();
-                    if (!(rawResult instanceof Map)) return kotlin.Unit.INSTANCE;
+                    val rawResult = param.result
+                    if (rawResult !is MutableMap<*, *>) return@after
 
-                    Map<Object, Object> resultMap = (Map<Object, Object>) rawResult;
+                    @Suppress("UNCHECKED_CAST")
+                    val resultMap = rawResult as MutableMap<Any, Any>
 
                     // تشخيص: نطبع نوع المفاتيح وعددها لمساعدتك على التأكيد
                     // من نوع المفتاح الفعلي المستخدم (Long ID أم String اسم).
-                    if (!resultMap.isEmpty()) {
-                        Object sampleKey = resultMap.keySet().iterator().next();
-                        LOG.debug(methodName + " -> حجم الناتج=" + resultMap.size()
-                                + " | نوع عينة من المفتاح=" + sampleKey.getClass().getName()
-                                + " | قيمة عينة=" + sampleKey);
+                    if (resultMap.isNotEmpty()) {
+                        val sampleKey = resultMap.keys.first()
+                        LOG.debug(
+                            "$methodName -> حجم الناتج=${resultMap.size}" +
+                                " | نوع عينة من المفتاح=${sampleKey::class.java.name}" +
+                                " | قيمة عينة=$sampleKey"
+                        )
                     } else {
-                        LOG.debug(methodName + " -> الناتج فارغ.");
+                        LOG.debug("$methodName -> الناتج فارغ.")
                     }
 
                     // محاولة الاسترجاع: نمسح كل الـ Map parameters المُمررة
-                    // كمُدخلات (Ljava/util/Map; في التوقيع) بحثاً عن أي
-                    // GuildMember/User موجود بالمُدخل لكنه غائب عن الناتج،
-                    // ونعيد بناءه بمفتاح فريد مضمون (النوع + userId).
-                    Object[] args = param.getArgs();
-                    Map<String, Object> reconciled = reconcileMissingUsers(resultMap, args);
+                    // كمُدخلات بحثاً عن أي GuildMember/User موجود بالمُدخل
+                    // لكنه غائب عن الناتج، ونعيد بناءه بمفتاح فريد مضمون
+                    // (النوع + userId).
+                    val args = param.args
+                    val reconciled = reconcileMissingUsers(resultMap, args)
                     if (reconciled != null) {
-                        param.setResult(reconciled);
-                        LOG.debug(methodName + " -> تم إعادة بناء الناتج بحجم="
-                                + reconciled.size() + " (كان=" + resultMap.size() + ")");
+                        param.result = reconciled
+                        LOG.debug(
+                            "$methodName -> تم إعادة بناء الناتج بحجم=" +
+                                "${reconciled.size} (كان=${resultMap.size})"
+                        )
                     }
-                } catch (Throwable inner) {
-                    LOG.error("خطأ أثناء إصلاح " + methodName, inner);
+                } catch (inner: Throwable) {
+                    LOG.error("خطأ أثناء إصلاح $methodName", inner)
                 }
-                return kotlin.Unit.INSTANCE;
-            });
-
-            if (unhook instanceof Runnable) unhooks.add((Runnable) unhook);
+            }
         }
     }
 
@@ -163,170 +147,166 @@ public class MentionDedupeFix extends Plugin {
      * ملاحظة: هذه دالة استرجاع دفاعية best-effort. إن لم تُطابق بنية
      * المُدخلات ما هو متوقع، تُرجع null ولا تُغيّر شيئاً (أماناً).
      */
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> reconcileMissingUsers(Map<Object, Object> original, Object[] args) {
-        try {
+    private fun reconcileMissingUsers(
+        original: Map<Any, Any>,
+        args: Array<Any?>
+    ): Map<String, Any>? {
+        return try {
             // نجمع كل userId الظاهرة كمفاتيح Long في أي Map ضمن الباراميترات.
-            java.util.Set<Long> candidateIds = new java.util.HashSet<>();
-            for (Object arg : args) {
-                if (arg instanceof Map) {
-                    for (Object k : ((Map<Object, Object>) arg).keySet()) {
-                        if (k instanceof Long) candidateIds.add((Long) k);
-                        else if (k instanceof Number) candidateIds.add(((Number) k).longValue());
+            val candidateIds = HashSet<Long>()
+            for (arg in args) {
+                if (arg is Map<*, *>) {
+                    for (k in arg.keys) {
+                        when (k) {
+                            is Long -> candidateIds.add(k)
+                            is Number -> candidateIds.add(k.toLong())
+                        }
                     }
                 }
             }
-            if (candidateIds.isEmpty()) return null;
+            if (candidateIds.isEmpty()) return null
 
             // نبني مفتاح فريد جديد لكل عنصر موجود بالفعل، بالاعتماد على
             // الـ ID الحقيقي إن استطعنا استخراجه من قيمة الـ Autocompletable.
-            Map<String, Object> rebuilt = new HashMap<>();
-            int recoveredCount = 0;
-
-            for (Map.Entry<Object, Object> e : original.entrySet()) {
-                Long id = extractUserId(e.getValue());
-                String key = (id != null) ? ("user:" + id) : ("raw:" + System.identityHashCode(e.getValue()));
-                rebuilt.putIfAbsent(key, e.getValue());
+            val rebuilt = HashMap<String, Any>()
+            for ((_, value) in original) {
+                val id = extractUserId(value)
+                val key = if (id != null) "user:$id" else "raw:${System.identityHashCode(value)}"
+                rebuilt.putIfAbsent(key, value)
             }
 
             // أي ID كان موجوداً بالمدخلات لكنه غائب عن rebuilt، لا يمكننا
             // بأمان إعادة تركيبه بدون معرفة المُنشئ الدقيق (نحتاج كائنات
             // User/GuildMember/Presence الحقيقية من نفس الطلب). لذلك في
             // هذا الإصدار نكتفي بتسجيله تشخيصياً بدل تخمين بيانات ناقصة.
-            for (Long id : candidateIds) {
-                if (!rebuilt.containsKey("user:" + id)) {
-                    recoveredCount++;
-                    LOG.warn("عضو بمعرف " + id + " موجود بالمُدخلات لكنه غائب عن نتيجة الاقتراحات "
-                            + "(تم رصده تشخيصياً، لم تتوفر بيانات كافية لإعادة بنائه تلقائياً هنا).");
+            var recoveredCount = 0
+            for (id in candidateIds) {
+                if (!rebuilt.containsKey("user:$id")) {
+                    recoveredCount++
+                    LOG.warn(
+                        "عضو بمعرف $id موجود بالمُدخلات لكنه غائب عن نتيجة الاقتراحات " +
+                            "(تم رصده تشخيصياً، لم تتوفر بيانات كافية لإعادة بنائه تلقائياً هنا)."
+                    )
                 }
             }
 
-            if (recoveredCount == 0 && rebuilt.size() == original.size()) {
+            if (recoveredCount == 0 && rebuilt.size == original.size) {
                 // لا فرق فعلي، لا داعي لاستبدال النتيجة الأصلية.
-                return null;
+                null
+            } else {
+                rebuilt
             }
-            return rebuilt;
-        } catch (Throwable t) {
-            LOG.error("reconcileMissingUsers فشلت بأمان", t);
-            return null;
+        } catch (t: Throwable) {
+            LOG.error("reconcileMissingUsers فشلت بأمان", t)
+            null
         }
     }
 
-    private Long extractUserId(Object autocompletableCandidate) {
-        if (autocompletableCandidate == null) return null;
-        try {
+    private fun extractUserId(autocompletableCandidate: Any?): Long? {
+        if (autocompletableCandidate == null) return null
+        return try {
             // UserAutocompletable.getUser().getId()
-            Method getUser = autocompletableCandidate.getClass().getMethod("getUser");
-            Object user = getUser.invoke(autocompletableCandidate);
-            if (user != null) {
-                Method getId = user.getClass().getMethod("getId");
-                Object idVal = getId.invoke(user);
-                if (idVal instanceof Long) return (Long) idVal;
-                if (idVal instanceof Number) return ((Number) idVal).longValue();
+            val getUser = autocompletableCandidate.javaClass.getMethod("getUser")
+            val user = getUser.invoke(autocompletableCandidate) ?: return null
+            val getId = user.javaClass.getMethod("getId")
+            when (val idVal = getId.invoke(user)) {
+                is Long -> idVal
+                is Number -> idVal.toLong()
+                else -> null
             }
-        } catch (Throwable ignored) {
+        } catch (ignored: Throwable) {
+            null
         }
-        return null;
     }
 
     // =====================================================================
     // 2) ChatInputAutocompleteAdapter.getItemId: إصلاح احتياطي لتصادم الـ stable ID
     // =====================================================================
 
-    private void patchAdapterStableIds() throws Exception {
-        Class<?> adapterClass = Class.forName(ADAPTER_CLASS);
-        Method getItem = adapterClass.getMethod("getItem", int.class);
-        getItem.setAccessible(true);
+    private fun patchAdapterStableIds() {
+        val adapterClass = Class.forName(ADAPTER_CLASS)
+        val getItem = adapterClass.getMethod("getItem", Int::class.javaPrimitiveType)
+        getItem.isAccessible = true
 
-        Method getItemId;
-        try {
-            getItemId = adapterClass.getMethod("getItemId", int.class);
-        } catch (NoSuchMethodException e) {
-            LOG.warn("getItemId(int) غير موجودة بهذا الاسم في نسختك.");
-            return;
+        val getItemId = try {
+            adapterClass.getMethod("getItemId", Int::class.javaPrimitiveType)
+        } catch (e: NoSuchMethodException) {
+            LOG.warn("getItemId(int) غير موجودة بهذا الاسم في نسختك.")
+            return
         }
-        getItemId.setAccessible(true);
+        getItemId.isAccessible = true
 
-        Object unhook = PatcherKt.instead(getItemId, param -> {
+        patcher.instead(getItemId) { param ->
             try {
-                Object thisAdapter = param.getThisObject();
-                Object[] args = param.getArgs();
-                int position = (int) args[0];
+                val thisAdapter = param.thisObject
+                val position = param.args[0] as Int
 
-                Object item = getItem.invoke(thisAdapter, position);
-                Long uniqueId = extractStableIdFor(item);
-                if (uniqueId != null) {
-                    return uniqueId;
-                }
-                // fallback: نستدعي التطبيق الأصلي إن تعذر استخراج ID فريد
-                return param.callOriginal();
-            } catch (Throwable inner) {
-                LOG.error("خطأ في getItemId المخصص، سيتم استخدام السلوك الأصلي", inner);
+                val item = getItem.invoke(thisAdapter, position)
+                val uniqueId = extractStableIdFor(item)
+                uniqueId ?: param.callOriginal()
+            } catch (inner: Throwable) {
+                LOG.error("خطأ في getItemId المخصص، سيتم استخدام السلوك الأصلي", inner)
                 try {
-                    return param.callOriginal();
-                } catch (Throwable t2) {
-                    return -1L;
+                    param.callOriginal()
+                } catch (t2: Throwable) {
+                    -1L
                 }
             }
-        });
-
-        if (unhook instanceof Runnable) unhooks.add((Runnable) unhook);
+        }
     }
 
     /**
      * يبني ID مستقر فريد اعتماداً على النوع (User/Role/Channel/...) بالإضافة
      * إلى المعرف الحقيقي للكائن، لضمان عدم تصادم عنصرين متشابهين بالاسم.
      */
-    private Long extractStableIdFor(Object autocompletable) {
-        if (autocompletable == null) return null;
-        String className = autocompletable.getClass().getSimpleName();
+    private fun extractStableIdFor(autocompletable: Any?): Long? {
+        if (autocompletable == null) return null
+        val className = autocompletable.javaClass.simpleName
 
-        Long id = tryInvokeChainForId(autocompletable, "getUser", "getId");
-        if (id == null) id = tryInvokeChainForId(autocompletable, "getRole", "getId");
-        if (id == null) id = tryInvokeChainForId(autocompletable, "getChannel", "getId");
-        if (id == null) id = tryDirectId(autocompletable);
-
-        if (id == null) return null;
+        val id = tryInvokeChainForId(autocompletable, "getUser", "getId")
+            ?: tryInvokeChainForId(autocompletable, "getRole", "getId")
+            ?: tryInvokeChainForId(autocompletable, "getChannel", "getId")
+            ?: tryDirectId(autocompletable)
+            ?: return null
 
         // ندمج النوع مع الـ ID في long واحد لتفادي أي تصادم بين IDs
         // متشابهة الأرقام من أنواع مختلفة (احتياط نظري).
-        long typeSalt = className.hashCode();
-        return (typeSalt << 40) ^ id;
+        val typeSalt = className.hashCode().toLong()
+        return (typeSalt shl 40) xor id
     }
 
-    private Long tryInvokeChainForId(Object root, String firstGetter, String secondGetter) {
-        try {
-            Method m1 = root.getClass().getMethod(firstGetter);
-            Object mid = m1.invoke(root);
-            if (mid == null) return null;
-            Method m2 = mid.getClass().getMethod(secondGetter);
-            Object idVal = m2.invoke(mid);
-            if (idVal instanceof Long) return (Long) idVal;
-            if (idVal instanceof Number) return ((Number) idVal).longValue();
-        } catch (Throwable ignored) {
+    private fun tryInvokeChainForId(root: Any, firstGetter: String, secondGetter: String): Long? {
+        return try {
+            val m1 = root.javaClass.getMethod(firstGetter)
+            val mid = m1.invoke(root) ?: return null
+            val m2 = mid.javaClass.getMethod(secondGetter)
+            when (val idVal = m2.invoke(mid)) {
+                is Long -> idVal
+                is Number -> idVal.toLong()
+                else -> null
+            }
+        } catch (ignored: Throwable) {
+            null
         }
-        return null;
     }
 
-    private Long tryDirectId(Object root) {
-        try {
-            Method m = root.getClass().getMethod("getId");
-            Object idVal = m.invoke(root);
-            if (idVal instanceof Long) return (Long) idVal;
-            if (idVal instanceof Number) return ((Number) idVal).longValue();
-        } catch (Throwable ignored) {
+    private fun tryDirectId(root: Any): Long? {
+        return try {
+            val m = root.javaClass.getMethod("getId")
+            when (val idVal = m.invoke(root)) {
+                is Long -> idVal
+                is Number -> idVal.toLong()
+                else -> null
+            }
+        } catch (ignored: Throwable) {
+            null
         }
-        return null;
     }
 
     // =====================================================================
     // أدوات مساعدة
     // =====================================================================
 
-    private Method findMethodByName(Class<?> clazz, String name) {
-        for (Method m : clazz.getDeclaredMethods()) {
-            if (m.getName().equals(name)) return m;
-        }
-        return null;
-    }
+    private fun findMethodByName(clazz: Class<*>, name: String): Method? =
+        clazz.declaredMethods.firstOrNull { it.name == name }
 }
