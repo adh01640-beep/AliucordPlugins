@@ -4,8 +4,7 @@ import android.content.Context
 import com.aliucord.Logger
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
-import com.aliucord.patcher.PinePatchFn
-import top.canyie.pine.Pine
+import de.robv.android.xposed.XC_MethodHook
 import java.lang.reflect.Method
 
 @AliucordPlugin
@@ -38,10 +37,6 @@ class MentionDedupeFix : Plugin() {
         patcher.unpatchAll()
     }
 
-    // =====================================================================
-    // 1) UserAutocompletableSource: الإصلاح الرئيسي
-    // =====================================================================
-
     private fun patchUserAutocompletableSource() {
         val sourceClass = Class.forName(SOURCE_CLASS)
 
@@ -51,42 +46,28 @@ class MentionDedupeFix : Plugin() {
         )) {
             val target = findMethodByName(sourceClass, methodName)
             if (target == null) {
-                LOG.warn("لم يتم العثور على الدالة: $methodName — راجع الاسم في نسختك.")
+                LOG.warn("لم يتم العثور على الدالة: $methodName")
                 continue
             }
             target.isAccessible = true
-            LOG.info("تم العثور على: $target")
+            
+            patcher.patch(target, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    try {
+                        val rawResult = param.result
+                        if (rawResult !is MutableMap<*, *>) return
 
-            patcher.patch(target, PinePatchFn { callFrame ->
-                try {
-                    val rawResult = callFrame.result
-                    if (rawResult !is MutableMap<*, *>) return@PinePatchFn
+                        @Suppress("UNCHECKED_CAST")
+                        val resultMap = rawResult as MutableMap<Any, Any>
 
-                    @Suppress("UNCHECKED_CAST")
-                    val resultMap = rawResult as MutableMap<Any, Any>
-
-                    if (resultMap.isNotEmpty()) {
-                        val sampleKey = resultMap.keys.first()
-                        LOG.debug(
-                            "$methodName -> حجم الناتج=${resultMap.size}" +
-                                " | نوع عينة من المفتاح=${sampleKey::class.java.name}" +
-                                " | قيمة عينة=$sampleKey"
-                        )
-                    } else {
-                        LOG.debug("$methodName -> الناتج فارغ.")
+                        val args = param.args
+                        val reconciled = reconcileMissingUsers(resultMap, args)
+                        if (reconciled != null) {
+                            param.result = reconciled
+                        }
+                    } catch (inner: Throwable) {
+                        LOG.error("خطأ أثناء إصلاح $methodName", inner)
                     }
-
-                    val args = callFrame.args
-                    val reconciled = reconcileMissingUsers(resultMap, args)
-                    if (reconciled != null) {
-                        callFrame.result = reconciled
-                        LOG.debug(
-                            "$methodName -> تم إعادة بناء الناتج بحجم=" +
-                                "${reconciled.size} (كان=${resultMap.size})"
-                        )
-                    }
-                } catch (inner: Throwable) {
-                    LOG.error("خطأ أثناء إصلاح $methodName", inner)
                 }
             })
         }
@@ -121,9 +102,6 @@ class MentionDedupeFix : Plugin() {
             for (id in candidateIds) {
                 if (!rebuilt.containsKey("user:$id")) {
                     recoveredCount++
-                    LOG.warn(
-                        "عضو بمعرف $id موجود بالمُدخلات لكنه غائب عن نتيجة الاقتراحات."
-                    )
                 }
             }
 
@@ -154,10 +132,6 @@ class MentionDedupeFix : Plugin() {
         }
     }
 
-    // =====================================================================
-    // 2) ChatInputAutocompleteAdapter.getItemId: تصادم الـ stable ID
-    // =====================================================================
-
     private fun patchAdapterStableIds() {
         val adapterClass = Class.forName(ADAPTER_CLASS)
         val getItem = adapterClass.getMethod("getItem", Int::class.javaPrimitiveType)
@@ -166,23 +140,25 @@ class MentionDedupeFix : Plugin() {
         val getItemId = try {
             adapterClass.getMethod("getItemId", Int::class.javaPrimitiveType)
         } catch (e: NoSuchMethodException) {
-            LOG.warn("getItemId(int) غير موجودة بهذا الاسم في نسختك.")
+            LOG.warn("getItemId(int) غير موجودة.")
             return
         }
         getItemId.isAccessible = true
 
-        patcher.patch(getItemId, PinePatchFn { callFrame ->
-            try {
-                val thisAdapter = callFrame.thisObject
-                val position = callFrame.args[0] as Int
+        patcher.patch(getItemId, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                try {
+                    val thisAdapter = param.thisObject
+                    val position = param.args[0] as Int
 
-                val item = getItem.invoke(thisAdapter, position)
-                val uniqueId = extractStableIdFor(item)
-                if (uniqueId != null) {
-                    callFrame.result = uniqueId
+                    val item = getItem.invoke(thisAdapter, position)
+                    val uniqueId = extractStableIdFor(item)
+                    if (uniqueId != null) {
+                        param.result = uniqueId 
+                    }
+                } catch (inner: Throwable) {
+                    LOG.error("خطأ في getItemId المخصص", inner)
                 }
-            } catch (inner: Throwable) {
-                LOG.error("خطأ في getItemId المخصص", inner)
             }
         })
     }
