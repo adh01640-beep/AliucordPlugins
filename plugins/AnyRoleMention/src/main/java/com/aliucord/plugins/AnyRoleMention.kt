@@ -7,34 +7,10 @@ import com.aliucord.Logger
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.fragments.SettingsPage
+import com.discord.stores.StoreStream
 import de.robv.android.xposed.XC_MethodHook
 import java.lang.reflect.Method
 
-/**
- * AnyRoleMention
- * ==========================================================================
- * الفكرة: إظهار كل الرتب في قائمة اقتراحات المنشن (@) حتى لو المستخدم
- * ملوش صلاحية يعمل بينج فعلي بيها، مع توضيح جنب اسم كل رتبة هل اختيارها
- * هيبعت إشعار فعلي (mention) ولا هيتكتب بس من غير تأثير (silent).
- *
- * ملاحظة API: نفس أسلوب الـ Hook المستخدم في MentionDedupeFix اللي أثبت
- * إنه شغال 100% عندك: patcher.patch(method, object : XC_MethodHook() {...})
- * — مش .after<T>(...) اللي كانت غلطة مني في نسخة سابقة.
- *
- * الأساس التقني (مؤكد من فحص bytecode الفعلي لإصدار Discord 126.21):
- *   RoleAutocompletable.canMention : Boolean   <- ديسكورد نفسه بيحسبها
- *   جاهزة لكل رتبة، إحنا بس بنستخدمها، مش بنتلاعب بأي صلاحية حقيقية.
- *
- *   AutocompleteViewModel.getAutocompleteViewState(query, list1, list2, bool)
- *     -> هي الدالة اللي بتجهّز اللستة النهائية المعروضة. بنقارنها باللستة
- *        الكاملة اللي دخلت كـ parameters، ونرجّع أي رتبة اتشالت لكنها لسه
- *        مطابقة للنص اللي المستخدم بيكتبه.
- *
- *   AutocompleteItemViewHolder.bindRole(RoleAutocompletable)
- *     -> الدالة اللي بترسم اسم الرتبة فعلياً. بنعمل Hook بعدها (after)
- *        ونضيف نص " (mention)"/" (silent)" على نفس الـ TextView من غير
- *        ما نغيّر أي منطق داخلي أو نص الإدخال الحقيقي.
- */
 @AliucordPlugin
 class AnyRoleMention : Plugin() {
 
@@ -74,17 +50,15 @@ class AnyRoleMention : Plugin() {
     }
 
     // =====================================================================
-    // 1) إرجاع كل الرتب المطابقة للنص، حتى الغير قابلة للمنشن
+    // 1) إجبار ديسكورد على إظهار كل الرتب عبر جلبها من StoreStream
     // =====================================================================
 
     private fun patchAutocompleteViewState() {
         val viewModelClass = Class.forName(VIEWMODEL_CLASS)
         val method: Method = viewModelClass.declaredMethods.firstOrNull {
             it.name == "getAutocompleteViewState" && it.parameterTypes.size == 4
-        } ?: run {
-            LOG.warn("لم يتم العثور على getAutocompleteViewState بالتوقيع المتوقع")
-            return
-        }
+        } ?: return
+
         method.isAccessible = true
 
         patcher.patch(method, object : XC_MethodHook() {
@@ -96,21 +70,13 @@ class AnyRoleMention : Plugin() {
                     if (!autocompleteStateClass.isInstance(resultState)) return
 
                     val roleClass = Class.forName(ROLE_AUTOCOMPLETABLE_CLASS)
-
-                    // كل الرتب اللي اتبعتت كـ parameters للدالة (المصدر الكامل قبل الفلترة)
-                    val allCandidateRoles = LinkedHashSet<Any>()
-                    for (argIndex in intArrayOf(1, 2)) {
-                        val list = param.args[argIndex] as? List<*> ?: continue
-                        for (item in list) {
-                            if (item != null && roleClass.isInstance(item)) allCandidateRoles.add(item)
-                        }
-                    }
-                    if (allCandidateRoles.isEmpty()) return
+                    val guildRoleClass = Class.forName("com.discord.api.role.GuildRole")
 
                     val getAutocompletables = autocompleteStateClass.getMethod("getAutocompletables")
                     @Suppress("UNCHECKED_CAST")
                     val currentList = getAutocompletables.invoke(resultState) as List<Any>
 
+                    // تسجيل الرتب اللي ديسكورد سمح بظهورها فعلاً
                     val alreadyShownRoleIds = HashSet<Long>()
                     for (item in currentList) {
                         if (roleClass.isInstance(item)) {
@@ -118,21 +84,39 @@ class AnyRoleMention : Plugin() {
                         }
                     }
 
-                    // أي رتبة مطابقة للنص اللي المستخدم كاتبه، وغائبة عن اللستة
-                    // النهائية (يعني اتشالت بسبب canMention=false)، نرجّعها.
+                    // -- الخطوة الذهبية: جلب كل رتب السيرفر متخطين فلترة ديسكورد --
+                    val guildId = StoreStream.getGuildSelected().selectedGuildId
+                    if (guildId == 0L) return
+
+                    val guildRolesMap = StoreStream.getGuilds().roles[guildId] ?: return
+                    val allRoles = guildRolesMap.values
+
+                    val roleAutoConstructor = roleClass.getConstructor(guildRoleClass, Boolean::class.javaPrimitiveType)
                     val matchesText = roleClass.getMethod("matchesText", String::class.java)
-                    val missingRoles = allCandidateRoles.filter { role ->
-                        val id = getRoleId(role)
-                        val matches = matchesText.invoke(role, query) as? Boolean ?: false
-                        (id == null || id !in alreadyShownRoleIds) && matches
+
+                    val missingRoles = ArrayList<Any>()
+                    for (role in allRoles) {
+                        val roleId = getRoleIdFromGuildRole(role) ?: continue
+                        
+                        // لو الرتبة ظاهرة أصلاً، نتخطاها
+                        if (roleId in alreadyShownRoleIds) continue 
+
+                        // صناعة كائن الرتبة برمجياً بصلاحية false (Silent)
+                        val roleAutoInstance = roleAutoConstructor.newInstance(role, false)
+                        
+                        // التحقق من مطابقتها لنص البحث
+                        val matches = matchesText.invoke(roleAutoInstance, query) as? Boolean ?: false
+                        if (matches) {
+                            missingRoles.add(roleAutoInstance)
+                        }
                     }
+
                     if (missingRoles.isEmpty()) return
 
                     val newList = ArrayList(currentList)
                     newList.addAll(missingRoles)
 
-                    // copy(isAutocomplete, isError, isLoading, autocompletables, stickers, token)
-                    // لازم يتنادى بالترتيب (positional) لأن الـ stub فاقد أسماء الباراميترات.
+                    // إعادة بناء State القائمة بالرتب الجديدة المضافة
                     val isAutocomplete = autocompleteStateClass.getMethod("isAutocomplete").invoke(resultState)
                     val isError = autocompleteStateClass.getMethod("isError").invoke(resultState)
                     val isLoading = autocompleteStateClass.getMethod("isLoading").invoke(resultState)
@@ -146,7 +130,6 @@ class AnyRoleMention : Plugin() {
                     )
 
                     param.result = newState
-                    LOG.debug("AnyRoleMention: تمت إضافة ${missingRoles.size} رتبة كانت مستبعدة (query=\"$query\")")
                 } catch (inner: Throwable) {
                     LOG.error("خطأ أثناء إعادة إضافة الرتب المستبعدة", inner)
                 }
@@ -155,7 +138,7 @@ class AnyRoleMention : Plugin() {
     }
 
     // =====================================================================
-    // 2) إضافة توضيح (mention)/(silent) بجانب اسم الرتبة في القائمة
+    // 2) إضافة توضيح (mention)/(silent)
     // =====================================================================
 
     private fun patchBindRoleLabel() {
@@ -189,12 +172,20 @@ class AnyRoleMention : Plugin() {
         })
     }
 
-    private fun getRoleId(role: Any): Long? {
+    private fun getRoleId(roleAuto: Any): Long? {
         return try {
-            val getRole = role.javaClass.getMethod("getRole")
-            val realRole = getRole.invoke(role) ?: return null
-            val getId = realRole.javaClass.getMethod("getId")
-            when (val idVal = getId.invoke(realRole)) {
+            val getRole = roleAuto.javaClass.getMethod("getRole")
+            val realRole = getRole.invoke(roleAuto) ?: return null
+            getRoleIdFromGuildRole(realRole)
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    private fun getRoleIdFromGuildRole(guildRole: Any): Long? {
+        return try {
+            val getId = guildRole.javaClass.getMethod("getId")
+            when (val idVal = getId.invoke(guildRole)) {
                 is Long -> idVal
                 is Number -> idVal.toLong()
                 else -> null
@@ -204,38 +195,25 @@ class AnyRoleMention : Plugin() {
         }
     }
 
-    /**
-     * getRole().getName() مش متاحة كـ property مباشر في نسخة الـ stub اللي
-     * بنبني عليها (الحقل الحقيقي private وبدون accessor بالاسم القياسي).
-     * بنستخدم reflection بدل ما نعتمد على اسم getter مبهم قد يتغيّر.
-     */
     private fun getRoleDisplayName(guildRole: Any): String? {
         for (getterName in arrayOf("getName", "g")) {
             try {
                 val m = guildRole.javaClass.getMethod(getterName)
                 val v = m.invoke(guildRole)
                 if (v is String) return v
-            } catch (ignored: Throwable) {
-            }
+            } catch (ignored: Throwable) {}
         }
         for (m in guildRole.javaClass.methods) {
             if (m.parameterCount == 0 && m.returnType == String::class.java && m.name != "toString") {
                 try {
                     val v = m.invoke(guildRole) as? String
                     if (!v.isNullOrEmpty()) return v
-                } catch (ignored: Throwable) {
-                }
+                } catch (ignored: Throwable) {}
             }
         }
         return null
     }
 
-    /**
-     * بدل الاعتماد على اسم حقل مبهم (زي "e") قد يتغيّر بين البنايات، بندور
-     * على أي TextView جوه binding.* نصه الحالي == اسم الرتبة بالظبط (لأن
-     * bindRole الأصلية كانت خلاص حطّت الاسم فيه قبل ما الـ hook بتاعنا يشتغل)،
-     * وده بيخلي الكود شغال حتى لو الحقل اتسمّى حرف تاني في نسخة تانية.
-     */
     private fun findRoleNameTextView(holder: Any, roleName: String?): TextView? {
         if (roleName == null) return null
         return try {
@@ -252,7 +230,6 @@ class AnyRoleMention : Plugin() {
             }
             null
         } catch (t: Throwable) {
-            LOG.error("findRoleNameTextView فشلت", t)
             null
         }
     }
@@ -278,10 +255,6 @@ class AnyRoleMentionSettings : SettingsPage() {
     }
 }
 
-/**
- * مرجع بسيط للوصول لـ settings الخاصة بالبلوقن من صفحة الإعدادات، بما إن
- * SettingsPage بيتفتح بمعزل عن نسخة الـ Plugin. بيتعبّى من start().
- */
 object AnyRoleMentionPluginRef {
     var plugin: AnyRoleMention? = null
 }
