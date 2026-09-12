@@ -8,6 +8,10 @@ import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.after
 import com.aliucord.patcher.before
+import com.aliucord.patcher.component1
+import com.aliucord.patcher.component2
+import com.aliucord.patcher.component3
+import com.aliucord.patcher.component4
 import com.discord.simpleast.core.parser.ParseSpec
 import com.discord.simpleast.core.parser.Parser
 import com.discord.simpleast.core.parser.Rule
@@ -202,7 +206,7 @@ class AdvancedSearchFilters : Plugin() {
         return try {
             val messagesField = response.javaClass.getDeclaredField("messages").apply { isAccessible = true }
             val originalMessages = messagesField.get(response) as? List<*> ?: return response
-            
+
             val filtered = originalMessages.filter { hitList ->
                 val messages = hitList as? List<*> ?: return@filter true
                 val targetMsg = messages.firstOrNull { msg ->
@@ -210,14 +214,14 @@ class AdvancedSearchFilters : Plugin() {
                     val hitField = msg.javaClass.getDeclaredField("hit").apply { isAccessible = true }
                     (hitField.get(msg) as? Boolean) == true
                 } ?: messages.firstOrNull()
-                
+
                 matchesAuthorType(targetMsg, wantedType)
             }
 
             val modifiersField = Field::class.java.getDeclaredField("accessFlags").apply { isAccessible = true }
             modifiersField.setInt(messagesField, messagesField.modifiers and Modifier.FINAL.inv())
             messagesField.set(response, filtered)
-            
+
             response
         } catch (e: Throwable) {
             logger.error("فشل فلترة type: - هترجع النتائج كاملة", e)
@@ -230,7 +234,7 @@ class AdvancedSearchFilters : Plugin() {
         return try {
             val authorField = entry.javaClass.getDeclaredField("author").apply { isAccessible = true }
             val author = authorField.get(entry) ?: return true
-            
+
             var isBot = false
             try {
                 val botMethod = author.javaClass.methods.firstOrNull { it.name.contains("bot", ignoreCase = true) && (it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType) }
@@ -238,7 +242,7 @@ class AdvancedSearchFilters : Plugin() {
                     isBot = botMethod.invoke(author) as? Boolean ?: false
                 }
             } catch (e: Throwable) {}
-            
+
             val webhookIdField = entry.javaClass.getDeclaredField("webhookId").apply { isAccessible = true }
             val webhookId = webhookIdField.get(entry)
 
