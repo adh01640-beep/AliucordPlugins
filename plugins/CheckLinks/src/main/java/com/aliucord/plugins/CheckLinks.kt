@@ -39,7 +39,6 @@ class CheckLinks : Plugin() {
         try {
             val uriHandlerClass = Class.forName("com.discord.utilities.uri.UriHandler")
             
-            // Universal Hook: Catch ALL routing methods (handle, handle$default, openUrl, etc.)
             val methods = uriHandlerClass.declaredMethods.filter { 
                 it.name.startsWith("handle") || it.name.startsWith("openUrl")
             }
@@ -52,20 +51,16 @@ class CheckLinks : Plugin() {
             for (method in methods) {
                 patcher.patch(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        // Dynamically find the URL argument regardless of the method signature
                         val url = param.args.firstOrNull { 
                             it is String && (it.startsWith("http://") || it.startsWith("https://")) 
                         } as? String ?: return
 
-                        // Ignore Discord internal deep links (e.g. mentions, channels)
                         if (url.contains("discord.com/channels") || url.contains("discordapp.com/channels")) {
                             return
                         }
 
-                        // Halt Discord's default behavior completely
                         param.result = null 
                         
-                        // Use AppActivity to ensure Dialogs don't crash the WindowManager
                         val activityContext = Utils.appActivity ?: param.args.firstOrNull { it is Context } as? Context ?: return
 
                         mainHandler.post {
@@ -91,7 +86,8 @@ class CheckLinks : Plugin() {
             return
         }
 
-        if (apiKey.isBlank()) {
+        // تم التعديل هنا: استخدام فحص Java الآمن بدلاً من isBlank()
+        if (apiKey == "") {
             promptForApiKey(context) { handleLinkClick(context, url) }
             return
         }
@@ -144,9 +140,12 @@ class CheckLinks : Plugin() {
     private fun showDetailsDialog(context: Context, result: VtResult) {
         val text = result.entries.joinToString("\n") { "${it.engine}: ${it.category}" }
 
+        // تم التعديل هنا: استخدام فحص الطول بدلاً من ifBlank()
+        val displayMessage = if (text.length == 0) "No per-engine details available." else text
+
         AlertDialog.Builder(context)
             .setTitle("Engine Results")
-            .setMessage(text.ifBlank { "No per-engine details available." })
+            .setMessage(displayMessage)
             .setPositiveButton("Close", null)
             .show()
     }
@@ -175,7 +174,8 @@ class CheckLinks : Plugin() {
             .setView(container)
             .setPositiveButton("Save") { _, _ ->
                 val key = input.text.toString().trim()
-                if (key.isNotEmpty()) {
+                // تم التعديل هنا: استخدام length بدلاً من isNotEmpty()
+                if (key.length > 0) {
                     prefs.edit().putString(PREF_API_KEY, key).apply()
                     onSaved()
                 }
