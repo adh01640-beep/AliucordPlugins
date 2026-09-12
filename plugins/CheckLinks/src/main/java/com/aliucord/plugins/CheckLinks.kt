@@ -7,8 +7,6 @@ import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.text.style.URLSpan
-import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Toast
@@ -16,10 +14,7 @@ import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
-import com.aliucord.patcher.after
-import com.aliucord.patcher.before
-import com.aliucord.patcher.component1
-import com.aliucord.patcher.component2
+import de.robv.android.xposed.XC_MethodHook
 import java.util.concurrent.ConcurrentHashMap
 
 @AliucordPlugin(requiresRestart = false)
@@ -41,16 +36,31 @@ class CheckLinks : Plugin() {
     override fun start(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        patcher.before<URLSpan>(
-            "onClick",
-            View::class.java,
-        ) { (param, view: View) ->
-            val url = this.url
-            param.result = null // we take over handling this click entirely
-
-            if (url != null) {
-                handleLinkClick(view.context, url)
+        try {
+            val uriHandlerClass = Class.forName("com.discord.utilities.uri.UriHandler")
+            // Robust method selection using name and parameter count to avoid Kotlin default argument issues
+            val handleMethod = uriHandlerClass.declaredMethods.firstOrNull { 
+                it.name == "handle" && it.parameterTypes.size >= 2 
             }
+
+            if (handleMethod != null) {
+                patcher.patch(handleMethod, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val contextObj = param.args.getOrNull(0) as? Context ?: return
+                        val url = param.args.getOrNull(1) as? String ?: return
+
+                        // Intercept and halt the original open action until scan finishes
+                        param.result = null
+                        mainHandler.post {
+                            handleLinkClick(contextObj, url)
+                        }
+                    }
+                })
+            } else {
+                logger.error("Could not find UriHandler.handle method", null)
+            }
+        } catch (e: Throwable) {
+            logger.error("Failed to initialize CheckLinks hook", e)
         }
     }
 
@@ -71,7 +81,7 @@ class CheckLinks : Plugin() {
             return
         }
 
-        Toast.makeText(context, "Checking link with VirusTotal…", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Checking link with VirusTotal...", Toast.LENGTH_SHORT).show()
 
         Utils.threadPool.execute {
             val result = try {
@@ -108,7 +118,7 @@ class CheckLinks : Plugin() {
         }
 
         AlertDialog.Builder(context)
-            .setTitle("Link safety check")
+            .setTitle("Link Safety Check")
             .setMessage(message)
             .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
             .setNegativeButton("Cancel", null)
@@ -120,7 +130,7 @@ class CheckLinks : Plugin() {
         val text = result.entries.joinToString("\n") { "${it.engine}: ${it.category}" }
 
         AlertDialog.Builder(context)
-            .setTitle("Engine results")
+            .setTitle("Engine Results")
             .setMessage(text.ifBlank { "No per-engine details available." })
             .setPositiveButton("Close", null)
             .show()
@@ -145,8 +155,8 @@ class CheckLinks : Plugin() {
         }
 
         AlertDialog.Builder(context)
-            .setTitle("VirusTotal API key required")
-            .setMessage("Get a free key at virustotal.com (Sign up → your profile → API key), then paste it below. You only need to do this once.")
+            .setTitle("VirusTotal API Key Required")
+            .setMessage("Get a free key at virustotal.com, then paste it below. You only need to do this once.")
             .setView(container)
             .setPositiveButton("Save") { _, _ ->
                 val key = input.text.toString().trim()
