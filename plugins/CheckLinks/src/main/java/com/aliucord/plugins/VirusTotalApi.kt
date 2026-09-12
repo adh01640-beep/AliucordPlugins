@@ -3,7 +3,6 @@ package com.aliucord.plugins
 import android.util.Base64
 import com.aliucord.Http
 import com.aliucord.utils.GsonUtils
-import com.aliucord.utils.GsonUtils.fromJson
 
 data class VtEntry(val engine: String, val category: String)
 
@@ -54,7 +53,7 @@ object VirusTotalApi {
             Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
         )
 
-        // Fast path: VirusTotal already has a report for this exact URL
+        // Fast path: Check if VirusTotal already has a cached report for this URL
         val cachedRes = Http.Request("$BASE/urls/$urlId", "GET")
             .setHeader("x-apikey", apiKey)
             .execute()
@@ -67,7 +66,7 @@ object VirusTotalApi {
             }
         }
 
-        // Not analyzed before: submit it for a fresh scan
+        // If not cached, submit the URL for a fresh analysis scan
         val submitRes = Http.Request("$BASE/urls", "POST")
             .setHeader("x-apikey", apiKey)
             .executeWithUrlEncodedForm(mapOf("url" to url))
@@ -77,7 +76,7 @@ object VirusTotalApi {
         val submitParsed = GsonUtils.gson.fromJson(submitRes.text(), VtSubmitResponse::class.java)
         val analysisId = submitParsed?.data?.id ?: return null
 
-        // Poll until the scan finishes (VT usually takes just a few seconds)
+        // Poll analysis status until completion
         repeat(10) {
             Thread.sleep(3000)
 
