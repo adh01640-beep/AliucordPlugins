@@ -59,6 +59,9 @@ class AdvancedSearchFilters : Plugin() {
     }
 
     private val placeholder by lazy { Utils.getResId("search_filter_from", "string") }
+    // Icon confirmed to exist on-device (used by other working Aliucord plugins);
+    // reused here to avoid crashing on an icon lookup for an unknown FilterType.
+    private val filterIcon by lazy { Utils.getResId("ic_text_channel_white_24dp", "drawable") }
     private var origFilterTypes: Array<FilterType>? = null
 
     override fun start(context: Context) {
@@ -140,14 +143,31 @@ class AdvancedSearchFilters : Plugin() {
             CharSequence::class.java,
             SearchStringProvider::class.java,
             Boolean::class.javaPrimitiveType!!,
-        ) { (param, _: CharSequence) ->
+        ) { (param, content: CharSequence) ->
             if (!SearchFilterTypes.ready) return@after
+
+            val stock = origFilterTypes
             val final = (param.result as List<SearchSuggestion>).toMutableList()
-            SearchFilterTypes.all().forEach { final.add(FilterSuggestion(it)) }
+            val insertAt = if (stock == null) {
+                final.size
+            } else {
+                final.indexOfLast { it is FilterSuggestion && it.filterType in stock } + 1
+            }
+
+            val matches = SearchFilterTypes.all().filter { type ->
+                val keyword = SearchFilterTypes.keywordFor(type) ?: return@filter false
+                "$keyword:".contains(content, ignoreCase = true)
+            }
+
+            matches.forEachIndexed { i, type -> final.add(insertAt + i, FilterSuggestion(type)) }
             param.result = final
         }
 
-        for (method in arrayOf("getFilterText", "getFilterTextId")) {
+        // NOTE: the real methods are "getFilterText" and "getAnswerText" — there is
+        // no "getFilterTextId" on FilterViewHolder. Using a nonexistent method name
+        // here previously threw NoSuchMethodException during start(), which made
+        // SearchFilterTypes.ready stay false and silently disabled every filter.
+        for (method in arrayOf("getFilterText", "getAnswerText")) {
             patcher.before<WidgetSearchSuggestionsAdapter.FilterViewHolder>(
                 method,
                 FilterType::class.java,
@@ -155,6 +175,15 @@ class AdvancedSearchFilters : Plugin() {
                 val keyword = SearchFilterTypes.keywordFor(type) ?: return@before
                 param.result = if (method == "getFilterText") "$keyword:" else placeholder
             }
+        }
+
+        patcher.before<WidgetSearchSuggestionsAdapter.FilterViewHolder>(
+            "getIconDrawable",
+            Context::class.java,
+            FilterType::class.java,
+        ) { (param, context: Context, type: FilterType) ->
+            if (!SearchFilterTypes.isOurs(type)) return@before
+            param.result = androidx.core.content.ContextCompat.getDrawable(context, filterIcon)
         }
 
         patcher.after<WidgetSearchSuggestionsAdapter.FilterViewHolder>(
