@@ -60,11 +60,9 @@ class CheckLinks : Plugin() {
                         }
 
                         param.result = null 
-                        
-                        val activityContext = Utils.appActivity ?: param.args.firstOrNull { it is Context } as? Context ?: return
 
                         mainHandler.post {
-                            handleLinkClick(activityContext, url)
+                            handleLinkClick(url)
                         }
                     }
                 })
@@ -79,19 +77,22 @@ class CheckLinks : Plugin() {
         cache.clear()
     }
 
-    private fun handleLinkClick(context: Context, url: String) {
+    private fun handleLinkClick(url: String) {
         val cached = cache[url]
         if (cached != null) {
-            showResultDialog(context, url, cached)
+            showResultDialog(url, cached)
             return
         }
 
         if (apiKey == "") {
-            promptForApiKey(context) { handleLinkClick(context, url) }
+            promptForApiKey { handleLinkClick(url) }
             return
         }
 
-        Toast.makeText(context, "Checking link with VirusTotal...", Toast.LENGTH_SHORT).show()
+        val currentActivity = Utils.appActivity
+        if (currentActivity != null && !currentActivity.isFinishing) {
+            Toast.makeText(currentActivity, "Checking link with VirusTotal...", Toast.LENGTH_SHORT).show()
+        }
 
         Utils.threadPool.execute {
             val result = try {
@@ -103,22 +104,30 @@ class CheckLinks : Plugin() {
 
             mainHandler.post {
                 if (result == null) {
-                    // إظهار نافذة تأكيد عند فشل الفحص بدلاً من فتح الرابط مباشرة
-                    AlertDialog.Builder(context)
-                        .setTitle("Scan Failed")
-                        .setMessage("Could not retrieve scan results from VirusTotal for this link. Do you still want to open it?\n\n$url")
-                        .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
-                        .setNegativeButton("Cancel", null)
-                        .show()
+                    val activity = Utils.appActivity
+                    if (activity != null && !activity.isFinishing) {
+                        AlertDialog.Builder(activity)
+                            .setTitle("Scan Failed")
+                            .setMessage("Could not retrieve scan results from VirusTotal for this link. Do you still want to open it?\n\n$url")
+                            .setPositiveButton("Open") { _, _ -> openUrl(url) }
+                            .setNegativeButton("Cancel", null)
+                            .show()
+                    } else {
+                        openUrl(url)
+                    }
                 } else {
                     cache[url] = result
-                    showResultDialog(context, url, result)
+                    showResultDialog(url, result)
                 }
             }
         }
     }
 
-    private fun showResultDialog(context: Context, url: String, result: VtResult) {
+    private fun showResultDialog(url: String, result: VtResult) {
+        val activity = Utils.appActivity
+        // الحماية من الكراش: التأكد أن النافذة موجودة ولم يتم تدميرها
+        if (activity == null || activity.isFinishing) return
+
         val message = buildString {
             if (result.totalEngines == 0) {
                 append("No engines have flagged this link yet — it may be too new or unscanned.\n\n")
@@ -132,46 +141,59 @@ class CheckLinks : Plugin() {
             append(url)
         }
 
-        AlertDialog.Builder(context)
+        AlertDialog.Builder(activity)
             .setTitle("Link Safety Check")
             .setMessage(message)
-            .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
+            .setPositiveButton("Open") { _, _ -> openUrl(url) }
             .setNegativeButton("Cancel", null)
-            .setNeutralButton("Details") { _, _ -> showDetailsDialog(context, result) }
+            .setNeutralButton("Details") { _, _ -> showDetailsDialog(result) }
             .show()
     }
 
-    private fun showDetailsDialog(context: Context, result: VtResult) {
-        val text = result.entries.joinToString("\n") { "${it.engine}: ${it.category}" }
+    private fun showDetailsDialog(result: VtResult) {
+        val activity = Utils.appActivity
+        if (activity == null || activity.isFinishing) return
 
+        val text = result.entries.joinToString("\n") { "${it.engine}: ${it.category}" }
         val displayMessage = if (text.length == 0) "No per-engine details available." else text
 
-        AlertDialog.Builder(context)
+        AlertDialog.Builder(activity)
             .setTitle("Engine Results")
             .setMessage(displayMessage)
             .setPositiveButton("Close", null)
             .show()
     }
 
-    private fun openUrl(context: Context, url: String) {
+    private fun openUrl(url: String) {
         try {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            val activity = Utils.appActivity
+            
+            if (activity != null) {
+                activity.startActivity(intent)
+            } else {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                Utils.appContext.startActivity(intent)
+            }
         } catch (e: Throwable) {
-            Toast.makeText(context, "Could not open link", Toast.LENGTH_SHORT).show()
+            logger.error("Could not open link", e)
         }
     }
 
-    private fun promptForApiKey(context: Context, onSaved: () -> Unit) {
-        val input = EditText(context).apply {
+    private fun promptForApiKey(onSaved: () -> Unit) {
+        val activity = Utils.appActivity
+        if (activity == null || activity.isFinishing) return
+
+        val input = EditText(activity).apply {
             hint = "VirusTotal API key"
         }
-        val padding = (16 * context.resources.displayMetrics.density).toInt()
-        val container = LinearLayout(context).apply {
+        val padding = (16 * activity.resources.displayMetrics.density).toInt()
+        val container = LinearLayout(activity).apply {
             setPadding(padding, padding, padding, padding)
             addView(input)
         }
 
-        AlertDialog.Builder(context)
+        AlertDialog.Builder(activity)
             .setTitle("VirusTotal API Key Required")
             .setMessage("Get a free key at virustotal.com, then paste it below. You only need to do this once.")
             .setView(container)
@@ -186,4 +208,3 @@ class CheckLinks : Plugin() {
             .show()
     }
 }
-
