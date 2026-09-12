@@ -82,8 +82,8 @@ class AnyRoleMention : Plugin() {
                     val guildId = StoreStream.getGuildSelected().selectedGuildId
                     if (guildId == 0L) return
 
-                    // الحل الجذري لمشكلة الكومبايلر: تعريف الـ Map بشكل صريح
-                    val guildRolesMap = StoreStream.getGuilds().roles[guildId] as? java.util.Map<*, *> ?: return
+                    // الحل النهائي: استخدام Kotlin Map لتجنب أي تعارض في استدعاء values
+                    val guildRolesMap = StoreStream.getGuilds().roles[guildId] as? Map<*, *> ?: return
                     val allRoles = guildRolesMap.values
 
                     val roleAutoConstructor = roleClass.getConstructor(guildRoleClass, Boolean::class.javaPrimitiveType)
