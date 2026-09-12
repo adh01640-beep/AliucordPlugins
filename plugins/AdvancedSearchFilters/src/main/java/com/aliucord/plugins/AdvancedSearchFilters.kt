@@ -123,7 +123,7 @@ class AdvancedSearchFilters : Plugin() {
     private fun patchSearchSuggestionEngine() {
         val engineClass = Class.forName("com.discord.utilities.search.suggestion.SearchSuggestionEngine")
         val getFilterMethod = engineClass.declaredMethods.firstOrNull { it.name == "getFilterSuggestions" }
-            ?: run { logger.error("getFilterSuggestions not found"); return }
+            ?: run { logger.warn("getFilterSuggestions not found"); return }
 
         val suggestionClass = Class.forName("com.discord.utilities.search.suggestion.entries.FilterSuggestion")
         val ctor = suggestionClass.getDeclaredConstructor(FilterType::class.java).apply { isAccessible = true }
@@ -246,7 +246,6 @@ class AdvancedSearchFilters : Plugin() {
         findFirst<TextView>(itemView)?.text = label
     }
 
-    // الأيقونات المتوافقة مع ملفات ديسكورد الأصلية
     private fun setIcon(itemView: View, type: FilterType) {
         val iv = findFirst<ImageView>(itemView) ?: return
 
@@ -266,21 +265,26 @@ class AdvancedSearchFilters : Plugin() {
         }
     }
 
-    private inline fun <reified T : View> findFirst(view: View): T? {
-        if (view is T) return view
+    // فصل دالة البحث إلى دالتين لحل مشكلة Inline Recursion
+    private fun <T : View> findFirstImpl(view: View, clazz: Class<T>): T? {
+        if (clazz.isInstance(view)) return clazz.cast(view)
         if (view is ViewGroup) {
             for (i in 0 until view.childCount) {
-                findFirst<T>(view.getChildAt(i))?.let { return it }
+                findFirstImpl(view.getChildAt(i), clazz)?.let { return it }
             }
         }
         return null
+    }
+
+    private inline fun <reified T : View> findFirst(view: View): T? {
+        return findFirstImpl(view, T::class.java)
     }
 
     private fun insertToken(anchor: View, token: String) {
         val root = anchor.rootView
         val input = findFirst<EditText>(root)
         if (input == null) {
-            logger.error("Could not locate the search EditText to insert '$token'")
+            logger.warn("Could not locate the search EditText to insert '$token'")
             return
         }
 
