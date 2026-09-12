@@ -112,7 +112,18 @@ class AnyRoleMention : Plugin() {
                 val newList = ArrayList<Autocompletable>(currentList)
                 newList.addAll(missingRoles)
 
-                param.result = resultState.copy(autocompletables = newList)
+                // ملاحظة: copy() هنا لازم يتنادى بالترتيب (positional)، مش بالأسماء
+                // (autocompletables = ...)، لأن الـ stub بتاع ديسكورد اللي بنبني
+                // عليه فاقد أسماء الباراميترات الأصلية (Kotlin metadata)، فالكومبايلر
+                // بيشوفهم p0..p5 بس ومش بيقبل named arguments هنا.
+                param.result = resultState.copy(
+                    resultState.isAutocomplete,
+                    resultState.isError,
+                    resultState.isLoading,
+                    newList,
+                    resultState.stickers,
+                    resultState.token
+                )
 
                 LOG.debug("AnyRoleMention: تمت إضافة ${missingRoles.size} رتبة كانت مستبعدة (query=\"$query\")")
             } catch (inner: Throwable) {
@@ -137,12 +148,41 @@ class AnyRoleMention : Plugin() {
                 val nameTextView = findRoleNameTextView(this, roleAutocompletable) ?: return@after
 
                 val suffix = if (roleAutocompletable.canMention) " (mention)" else " (silent)"
-                val baseName = roleAutocompletable.role?.name ?: nameTextView.text.toString()
+                val realRole = roleAutocompletable.role
+                val baseName = (if (realRole != null) getRoleDisplayName(realRole) else null)
+                    ?: nameTextView.text.toString()
                 nameTextView.text = baseName + suffix
             } catch (inner: Throwable) {
                 LOG.error("خطأ أثناء إضافة توضيح mention/silent", inner)
             }
         }
+    }
+
+    /**
+     * getRole().getName() مش متاحة كـ property مباشر في نسخة الـ stub اللي
+     * بنبني عليها (الحقل الحقيقي private وبدون accessor بالاسم القياسي).
+     * بنستخدم reflection بدل ما نعتمد على اسم getter مبهم قد يتغيّر.
+     */
+    private fun getRoleDisplayName(guildRole: Any): String? {
+        for (getterName in arrayOf("getName", "g")) {
+            try {
+                val m = guildRole.javaClass.getMethod(getterName)
+                val v = m.invoke(guildRole)
+                if (v is String) return v
+            } catch (ignored: Throwable) {
+            }
+        }
+        // fallback: أي دالة من غير باراميترات بترجع String (غير toString)
+        for (m in guildRole.javaClass.methods) {
+            if (m.parameterCount == 0 && m.returnType == String::class.java && m.name != "toString") {
+                try {
+                    val v = m.invoke(guildRole) as? String
+                    if (!v.isNullOrEmpty()) return v
+                } catch (ignored: Throwable) {
+                }
+            }
+        }
+        return null
     }
 
     /**
@@ -157,7 +197,8 @@ class AnyRoleMention : Plugin() {
             bindingField.isAccessible = true
             val binding = bindingField.get(holder) ?: return null
 
-            val roleName = role.role?.name ?: return null
+            val realRole = role.role ?: return null
+            val roleName = getRoleDisplayName(realRole) ?: return null
             for (f in binding.javaClass.declaredFields) {
                 if (TextView::class.java.isAssignableFrom(f.type)) {
                     f.isAccessible = true
@@ -200,4 +241,3 @@ class AnyRoleMentionSettings : SettingsPage() {
 object AnyRoleMentionPluginRef {
     var plugin: AnyRoleMention? = null
 }
-
