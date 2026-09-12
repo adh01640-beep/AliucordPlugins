@@ -26,6 +26,8 @@ class AdvancedSearchFilters : Plugin() {
         var FILTER_AUTHOR_TYPE: FilterType? = null
     }
 
+    private val originalFiltersMap = HashMap<Int, String>()
+
     override fun start(context: Context) {
         try {
             injectCustomFilters()
@@ -39,6 +41,7 @@ class AdvancedSearchFilters : Plugin() {
 
     override fun stop(context: Context) {
         patcher.unpatchAll()
+        originalFiltersMap.clear()
     }
 
     /**
@@ -88,9 +91,7 @@ class AdvancedSearchFilters : Plugin() {
         
         patcher.patch(getFilterMethod, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
-                // الحل الجذري لمشكلة out projection في Kotlin
                 val currentSuggestions = ArrayList<Any>()
-                
                 val resultList = param.result as? Collection<*>
                 if (resultList != null) {
                     currentSuggestions.addAll(resultList.filterNotNull())
@@ -111,26 +112,29 @@ class AdvancedSearchFilters : Plugin() {
     }
 
     /**
-     * 3. تزويد ديسكورد بالنصوص الرسمية ليتعرف عليها المحرك
+     * 3. تزويد ديسكورد بالنصوص الرسمية ليتعرف عليها المحرك بشكل آمن
      */
     private fun patchSearchStringProvider() {
         val providerClass = Class.forName("com.discord.utilities.search.strings.SearchStringProvider")
         
         patcher.patch(providerClass.getDeclaredMethod("getFilterText", FilterType::class.java), object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                when (param.args[0]) {
-                    FILTER_BEFORE -> param.result = "before:"
-                    FILTER_AFTER -> param.result = "after:"
-                    FILTER_ON -> param.result = "on:"
-                    FILTER_AUTHOR_TYPE -> param.result = "type:"
+                // الاعتماد على الاسم كنص لتفادي كراش الذاكرة واختلاف الـ Classloaders
+                val filterName = (param.args[0] as? Enum<*>)?.name ?: return
+                when (filterName) {
+                    "BEFORE" -> param.result = "before:"
+                    "AFTER" -> param.result = "after:"
+                    "ON" -> param.result = "on:"
+                    "AUTHOR_TYPE" -> param.result = "type:"
                 }
             }
         })
         
         patcher.patch(providerClass.getDeclaredMethod("getFilterTextId", FilterType::class.java), object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                when (param.args[0]) {
-                    FILTER_BEFORE, FILTER_AFTER, FILTER_ON, FILTER_AUTHOR_TYPE -> {
+                val filterName = (param.args[0] as? Enum<*>)?.name ?: return
+                when (filterName) {
+                    "BEFORE", "AFTER", "ON", "AUTHOR_TYPE" -> {
                         param.result = Utils.getResId("search_filter_from", "string")
                     }
                 }
@@ -139,44 +143,70 @@ class AdvancedSearchFilters : Plugin() {
     }
 
     /**
-     * 4. تغيير نصوص الواجهة ومنع الكراش
+     * 4. خدعة التنكر الآمنة لواجهة المستخدم
      */
     private fun patchFilterViewHolder() {
         val vhClass = Class.forName("com.discord.widgets.search.suggestions.WidgetSearchSuggestionsAdapter\$FilterViewHolder")
-        val filterTypeClass = Class.forName("com.discord.utilities.search.query.FilterType")
         val suggestionClass = Class.forName("com.discord.utilities.search.suggestion.entries.FilterSuggestion")
         
-        // 1. إيقاف الكراش من جذوره بعمل Bypass لدالة getFilterText
-        patcher.patch(vhClass.getDeclaredMethod("getFilterText", filterTypeClass), object : XC_MethodHook() {
+        patcher.patch(vhClass.getDeclaredMethod("onConfigure", Int::class.javaPrimitiveType, suggestionClass), object : XC_MethodHook() {
+            
             override fun beforeHookedMethod(param: MethodHookParam) {
-                val filterType = param.args[0] as? FilterType ?: return
+                val suggestion = param.args[1] ?: return
                 
-                // لو الفلتر تبعنا، هنرجع ID وهمي ونمنع ديسكورد من تشغيل الكود الأصلي اللي بيعمل كراش
-                if (filterType == FILTER_BEFORE || filterType == FILTER_AFTER || filterType == FILTER_ON || filterType == FILTER_AUTHOR_TYPE) {
-                    param.result = Utils.getResId("search_filter_from", "string")
+                for (field in suggestion.javaClass.declaredFields) {
+                    field.isAccessible = true
+                    val value = field.get(suggestion)
+                    if (value is Enum<*>) {
+                        val filterName = value.name
+                        if (filterName == "BEFORE" || filterName == "AFTER" || filterName == "ON" || filterName == "AUTHOR_TYPE") {
+                            // حفظ اسم الفلتر الأصلي للعودة إليه لاحقاً
+                            originalFiltersMap[param.thisObject.hashCode()] = filterName
+                            
+                            // التنكر: تحويله مؤقتاً إلى FROM حتى تقبله الواجهة
+                            val fallback = java.lang.Enum.valueOf(value.javaClass, "FROM")
+                            field.set(suggestion, fallback)
+                            break
+                        }
+                    }
                 }
             }
-        })
-
-        // 2. تعديل النصوص والأيقونات بأمان بعد اكتمال الرسم
-        patcher.patch(vhClass.getDeclaredMethod("onConfigure", Int::class.javaPrimitiveType, suggestionClass), object : XC_MethodHook() {
+            
             override fun afterHookedMethod(param: MethodHookParam) {
+                val originalName = originalFiltersMap.remove(param.thisObject.hashCode()) ?: return
                 val suggestion = param.args[1] ?: return
-                val filterTypeField = suggestionClass.declaredFields.firstOrNull { it.type.name == "com.discord.utilities.search.query.FilterType" } ?: return
-                filterTypeField.isAccessible = true
-                val filterType = filterTypeField.get(suggestion) as? FilterType ?: return
                 
-                val customText = when (filterType) {
-                    FILTER_BEFORE -> "Before a date"
-                    FILTER_AFTER -> "After a date"
-                    FILTER_ON -> "Sent on a date"
-                    FILTER_AUTHOR_TYPE -> "By author type"
+                // استرجاع الفلتر الأصلي بعد انتهاء الواجهة من الرسم
+                for (field in suggestion.javaClass.declaredFields) {
+                    field.isAccessible = true
+                    val value = field.get(suggestion)
+                    if (value is Enum<*> && value.name == "FROM") {
+                        val originalEnum = when (originalName) {
+                            "BEFORE" -> FILTER_BEFORE
+                            "AFTER" -> FILTER_AFTER
+                            "ON" -> FILTER_ON
+                            "AUTHOR_TYPE" -> FILTER_AUTHOR_TYPE
+                            else -> null
+                        }
+                        if (originalEnum != null) {
+                            field.set(suggestion, originalEnum)
+                        }
+                        break
+                    }
+                }
+                
+                // تعديل النصوص لتطابق الفلتر الجديد
+                val customText = when (originalName) {
+                    "BEFORE" -> "Before a date"
+                    "AFTER" -> "After a date"
+                    "ON" -> "Sent on a date"
+                    "AUTHOR_TYPE" -> "By author type"
                     else -> null
                 }
                 
-                val customHint = when (filterType) {
-                    FILTER_BEFORE, FILTER_AFTER, FILTER_ON -> "date"
-                    FILTER_AUTHOR_TYPE -> "user, bot, or webhook"
+                val customHint = when (originalName) {
+                    "BEFORE", "AFTER", "ON" -> "date"
+                    "AUTHOR_TYPE" -> "user, bot, or webhook"
                     else -> null
                 }
                 
