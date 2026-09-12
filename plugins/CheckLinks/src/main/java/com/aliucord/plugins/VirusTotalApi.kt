@@ -2,7 +2,7 @@ package com.aliucord.plugins
 
 import android.util.Base64
 import com.aliucord.Http
-import com.google.gson.Gson
+import org.json.JSONObject
 
 data class VtEntry(val engine: String, val category: String)
 
@@ -16,37 +16,16 @@ data class VtResult(
     val entries: List<VtEntry>,
 )
 
-private data class VtStats(
-    val malicious: Int = 0,
-    val suspicious: Int = 0,
-    val harmless: Int = 0,
-    val undetected: Int = 0,
-    val timeout: Int = 0,
+private data class VtStatsHelper(
+    val malicious: Int,
+    val suspicious: Int,
+    val harmless: Int,
+    val undetected: Int,
+    val timeout: Int,
 )
-
-private data class VtEngineResult(val category: String)
-
-private data class VtCachedAttributes(
-    val last_analysis_stats: VtStats?,
-    val last_analysis_results: Map<String, VtEngineResult>?,
-)
-private data class VtCachedData(val attributes: VtCachedAttributes?)
-private data class VtCachedResponse(val data: VtCachedData?)
-
-private data class VtAnalysisAttributes(
-    val status: String?,
-    val stats: VtStats?,
-    val results: Map<String, VtEngineResult>?,
-)
-private data class VtAnalysisData(val attributes: VtAnalysisAttributes?)
-private data class VtAnalysisResponse(val data: VtAnalysisData?)
-
-private data class VtSubmitData(val id: String?)
-private data class VtSubmitResponse(val data: VtSubmitData?)
 
 object VirusTotalApi {
     private const val BASE = "https://www.virustotal.com/api/v3"
-    private val gson = Gson()
 
     fun check(url: String, apiKey: String): VtResult? {
         val urlId = Base64.encodeToString(
@@ -60,10 +39,17 @@ object VirusTotalApi {
             .execute()
 
         if (cachedRes.ok()) {
-            val parsed = gson.fromJson(cachedRes.text(), VtCachedResponse::class.java)
-            val attrs = parsed?.data?.attributes
-            if (attrs?.last_analysis_stats != null) {
-                return buildResult(attrs.last_analysis_stats, attrs.last_analysis_results)
+            try {
+                val root = JSONObject(cachedRes.text())
+                val attrs = root.optJSONObject("data")?.optJSONObject("attributes")
+                val statsObj = attrs?.optJSONObject("last_analysis_stats")
+                if (statsObj != null) {
+                    val stats = parseStats(statsObj)
+                    val resultsMap = parseResults(attrs.optJSONObject("last_analysis_results"))
+                    return buildResult(stats, resultsMap)
+                }
+            } catch (e: Throwable) {
+                // Ignore parse errors and proceed to submit
             }
         }
 
@@ -74,8 +60,12 @@ object VirusTotalApi {
 
         if (!submitRes.ok()) return null
 
-        val submitParsed = gson.fromJson(submitRes.text(), VtSubmitResponse::class.java)
-        val analysisId = submitParsed?.data?.id ?: return null
+        val analysisId = try {
+            val root = JSONObject(submitRes.text())
+            root.optJSONObject("data")?.optString("id")
+        } catch (e: Throwable) {
+            null
+        } ?: return null
 
         // Poll analysis status until completion
         repeat(10) {
@@ -87,24 +77,54 @@ object VirusTotalApi {
 
             if (!pollRes.ok()) return@repeat
 
-            val pollParsed = gson.fromJson(pollRes.text(), VtAnalysisResponse::class.java)
-            val attrs = pollParsed?.data?.attributes ?: return@repeat
+            try {
+                val root = JSONObject(pollRes.text())
+                val attrs = root.optJSONObject("data")?.optJSONObject("attributes")
+                val status = attrs?.optString("status")
+                val statsObj = attrs?.optJSONObject("stats")
 
-            if (attrs.status == "completed" && attrs.stats != null) {
-                return buildResult(attrs.stats, attrs.results)
+                if (status == "completed" && statsObj != null) {
+                    val stats = parseStats(statsObj)
+                    val resultsMap = parseResults(attrs.optJSONObject("results"))
+                    return buildResult(stats, resultsMap)
+                }
+            } catch (e: Throwable) {
+                // Continue polling on parse failure
             }
         }
 
         return null
     }
 
-    private fun buildResult(stats: VtStats, results: Map<String, VtEngineResult>?): VtResult {
+    private fun parseStats(obj: JSONObject): VtStatsHelper {
+        return VtStatsHelper(
+            malicious = obj.optInt("malicious", 0),
+            suspicious = obj.optInt("suspicious", 0),
+            harmless = obj.optInt("harmless", 0),
+            undetected = obj.optInt("undetected", 0),
+            timeout = obj.optInt("timeout", 0),
+        )
+    }
+
+    private fun parseResults(obj: JSONObject?): Map<String, String> {
+        if (obj == null) return emptyMap()
+        val map = mutableMapOf<String, String>()
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val engineName = keys.next()
+            val engineObj = obj.optJSONObject(engineName)
+            val category = engineObj?.optString("category") ?: "unknown"
+            map[engineName] = category
+        }
+        return map
+    }
+
+    private fun buildResult(stats: VtStatsHelper, results: Map<String, String>): VtResult {
         val total = stats.malicious + stats.suspicious + stats.harmless + stats.undetected + stats.timeout
         val unsafe = stats.malicious + stats.suspicious
         val safePercent = if (total == 0) 100 else (((total - unsafe).toDouble() / total) * 100).toInt()
 
-        val entries = results.orEmpty()
-            .map { (engine, res) -> VtEntry(engine, res.category) }
+        val entries = results.map { (engine, category) -> VtEntry(engine, category) }
             .sortedBy { it.category }
 
         return VtResult(
