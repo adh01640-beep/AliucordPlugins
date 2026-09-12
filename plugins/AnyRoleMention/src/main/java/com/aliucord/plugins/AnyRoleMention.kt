@@ -49,10 +49,6 @@ class AnyRoleMention : Plugin() {
         AnyRoleMentionPluginRef.plugin = null
     }
 
-    // =====================================================================
-    // 1) إجبار ديسكورد على إظهار كل الرتب عبر جلبها من StoreStream
-    // =====================================================================
-
     private fun patchAutocompleteViewState() {
         val viewModelClass = Class.forName(VIEWMODEL_CLASS)
         val method: Method = viewModelClass.declaredMethods.firstOrNull {
@@ -64,7 +60,7 @@ class AnyRoleMention : Plugin() {
         patcher.patch(method, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 try {
-                    val query = param.args[0] as? String ?: return
+                    val query = param.args[0] as? String ?: ""
                     val resultState = param.result ?: return
                     val autocompleteStateClass = Class.forName(VIEWSTATE_AUTOCOMPLETE_CLASS)
                     if (!autocompleteStateClass.isInstance(resultState)) return
@@ -76,7 +72,6 @@ class AnyRoleMention : Plugin() {
                     @Suppress("UNCHECKED_CAST")
                     val currentList = getAutocompletables.invoke(resultState) as List<Any>
 
-                    // تسجيل الرتب اللي ديسكورد سمح بظهورها فعلاً
                     val alreadyShownRoleIds = HashSet<Long>()
                     for (item in currentList) {
                         if (roleClass.isInstance(item)) {
@@ -84,29 +79,29 @@ class AnyRoleMention : Plugin() {
                         }
                     }
 
-                    // -- الخطوة الذهبية: جلب كل رتب السيرفر متخطين فلترة ديسكورد --
+                    // الجلب الصحيح للرتب متوافق مع Aliucord Stubs
                     val guildId = StoreStream.getGuildSelected().selectedGuildId
                     if (guildId == 0L) return
 
-                    val guildRolesMap = StoreStream.getGuilds().roles[guildId] ?: return
-                    val allRoles = guildRolesMap.values
+                    val guild = StoreStream.getGuilds().getGuild(guildId) ?: return
+                    val allRoles = guild.roles?.values ?: return
 
                     val roleAutoConstructor = roleClass.getConstructor(guildRoleClass, Boolean::class.javaPrimitiveType)
-                    val matchesText = roleClass.getMethod("matchesText", String::class.java)
-
+                    
+                    // تنظيف نص البحث من الـ @ والمقارنة اليدوية
+                    val cleanQuery = query.replace("@", "").lowercase()
                     val missingRoles = ArrayList<Any>()
+                    
                     for (role in allRoles) {
                         val roleId = getRoleIdFromGuildRole(role) ?: continue
-                        
-                        // لو الرتبة ظاهرة أصلاً، نتخطاها
                         if (roleId in alreadyShownRoleIds) continue 
 
-                        // صناعة كائن الرتبة برمجياً بصلاحية false (Silent)
-                        val roleAutoInstance = roleAutoConstructor.newInstance(role, false)
+                        val roleName = getRoleDisplayName(role) ?: continue
                         
-                        // التحقق من مطابقتها لنص البحث
-                        val matches = matchesText.invoke(roleAutoInstance, query) as? Boolean ?: false
-                        if (matches) {
+                        // الفلترة الخاصة بالبلوقن
+                        if (cleanQuery.isEmpty() || roleName.lowercase().contains(cleanQuery)) {
+                            // إضافة الرتبة بصلاحية false (Silent)
+                            val roleAutoInstance = roleAutoConstructor.newInstance(role, false)
                             missingRoles.add(roleAutoInstance)
                         }
                     }
@@ -116,7 +111,6 @@ class AnyRoleMention : Plugin() {
                     val newList = ArrayList(currentList)
                     newList.addAll(missingRoles)
 
-                    // إعادة بناء State القائمة بالرتب الجديدة المضافة
                     val isAutocomplete = autocompleteStateClass.getMethod("isAutocomplete").invoke(resultState)
                     val isError = autocompleteStateClass.getMethod("isError").invoke(resultState)
                     val isLoading = autocompleteStateClass.getMethod("isLoading").invoke(resultState)
@@ -136,10 +130,6 @@ class AnyRoleMention : Plugin() {
             }
         })
     }
-
-    // =====================================================================
-    // 2) إضافة توضيح (mention)/(silent)
-    // =====================================================================
 
     private fun patchBindRoleLabel() {
         val holderClass = Class.forName(ITEM_VIEWHOLDER_CLASS)
