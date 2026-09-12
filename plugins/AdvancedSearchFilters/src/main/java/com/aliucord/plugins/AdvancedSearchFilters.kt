@@ -33,6 +33,7 @@ import com.discord.utilities.search.suggestion.entries.SearchSuggestion
 import com.discord.widgets.search.suggestions.WidgetSearchSuggestionsAdapter
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
+import java.lang.reflect.Proxy
 import java.util.regex.Pattern
 
 @AliucordPlugin(requiresRestart = false)
@@ -196,9 +197,23 @@ class AdvancedSearchFilters : Plugin() {
             SearchQuery::class.java,
         ) { (param, _: StoreSearch.SearchTarget, _: Long?, query: SearchQuery) ->
             val wantedType = query.params["author_type"]?.firstOrNull()?.lowercase() ?: return@after
-            val original = param.result as? rx.Observable<Any> ?: return@after
-            param.result = original.map { response -> filterByAuthorType(response, wantedType) }
+            val original = param.result ?: return@after
+            param.result = mapObservableAuthorType(original, wantedType)
         }
+    }
+
+    private fun mapObservableAuthorType(observable: Any, wantedType: String): Any {
+        val func1Class = Class.forName("rx.functions.Func1")
+        val proxy = Proxy.newProxyInstance(
+            func1Class.classLoader,
+            arrayOf(func1Class),
+        ) { _, method, args ->
+            if (method.name == "call" && args != null && args.isNotEmpty()) {
+                filterByAuthorType(args[0], wantedType)
+            } else null
+        }
+        val mapMethod = observable.javaClass.getMethod("map", func1Class)
+        return mapMethod.invoke(observable, proxy)!!
     }
 
     private fun filterByAuthorType(response: Any?, wantedType: String): Any? {
