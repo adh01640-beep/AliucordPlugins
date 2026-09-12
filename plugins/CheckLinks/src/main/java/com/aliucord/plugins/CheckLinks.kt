@@ -30,6 +30,9 @@ class CheckLinks : Plugin() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var prefs: SharedPreferences
 
+    @Volatile
+    private var bypassedUrl: String? = null
+
     private val apiKey: String
         get() = prefs.getString(PREF_API_KEY, "") ?: ""
 
@@ -46,7 +49,6 @@ class CheckLinks : Plugin() {
             for (method in methods) {
                 patcher.patch(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        // سحب الرابط الحي من البارامترات سواء كان String أو Uri
                         val urlStr = param.args.firstOrNull { 
                             it is String && (it.startsWith("http://") || it.startsWith("https://")) 
                         } as? String
@@ -54,15 +56,18 @@ class CheckLinks : Plugin() {
                         val uriObj = param.args.firstOrNull { it is Uri } as? Uri
                         val finalUrl = urlStr ?: uriObj?.toString() ?: return
 
-                        // تجاهل روابط ديسكورد الداخلية
+                        // السماح للروابط بالمرور فوراً إذا تم استثناؤها (عند الضغط على Open in App أو Browser)
+                        if (finalUrl == bypassedUrl) {
+                            bypassedUrl = null
+                            return
+                        }
+
                         if (finalUrl.contains("discord.com/channels") || finalUrl.contains("discordapp.com/channels")) {
                             return
                         }
 
-                        // سحب الشاشة الحالية بدقة لتفادي الكراش
                         val currentContext = param.args.firstOrNull { it is Context } as? Context ?: Utils.appActivity ?: return
 
-                        // إيقاف فتح الرابط الافتراضي
                         param.result = null 
 
                         mainHandler.post {
@@ -111,11 +116,12 @@ class CheckLinks : Plugin() {
                         AlertDialog.Builder(context)
                             .setTitle("Scan Failed")
                             .setMessage("Could not retrieve scan results from VirusTotal for this link. Do you still want to open it?\n\n$url")
-                            .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
+                            .setPositiveButton("Open in App") { _, _ -> openInApp(context, url) }
+                            .setNeutralButton("Open in Browser") { _, _ -> openUrl(context, url) }
                             .setNegativeButton("Cancel", null)
                             .show()
                     } catch (e: Throwable) {
-                        openUrl(context, url) // خطة بديلة لو الشاشة ماتت
+                        openUrl(context, url) 
                     }
                 } else {
                     cache[url] = result
@@ -140,15 +146,49 @@ class CheckLinks : Plugin() {
         }
 
         try {
-            AlertDialog.Builder(context)
+            // تصميم واجهة مخصصة لدمج زر التفاصيل داخل النافذة نفسها
+            val layout = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                val padding = (16 * context.resources.displayMetrics.density).toInt()
+                setPadding(padding, padding, padding, padding)
+            }
+
+            val msgView = android.widget.TextView(context).apply {
+                text = message
+                textSize = 15f
+                setTextIsSelectable(true)
+            }
+
+            val detailsBtn = android.widget.TextView(context).apply {
+                text = "VIEW ENGINE DETAILS"
+                textSize = 14f
+                setTextColor(android.graphics.Color.parseColor("#7289da")) // لون ديسكورد الأزرق
+                setPadding(0, (24 * context.resources.displayMetrics.density).toInt(), 0, 0)
+            }
+
+            layout.addView(msgView)
+            layout.addView(detailsBtn)
+
+            val scrollView = android.widget.ScrollView(context).apply {
+                addView(layout)
+            }
+
+            var dialog: AlertDialog? = null
+            detailsBtn.setOnClickListener {
+                dialog?.dismiss()
+                showDetailsDialog(context, result)
+            }
+
+            dialog = AlertDialog.Builder(context)
                 .setTitle("Link Safety Check")
-                .setMessage(message)
-                .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
+                .setView(scrollView)
+                .setPositiveButton("Open in App") { _, _ -> openInApp(context, url) }
+                .setNeutralButton("Open in Browser") { _, _ -> openUrl(context, url) }
                 .setNegativeButton("Cancel", null)
-                .setNeutralButton("Details") { _, _ -> showDetailsDialog(context, result) }
                 .show()
+
         } catch (e: Throwable) {
-            openUrl(context, url) // خطة بديلة لعدم تجميد الرابط
+            openUrl(context, url) 
         }
     }
 
@@ -165,14 +205,27 @@ class CheckLinks : Plugin() {
         } catch (e: Throwable) {}
     }
 
+    private fun openInApp(context: Context, url: String) {
+        bypassedUrl = url // إخبار الهوك بتمرير هذا الرابط وعدم فحصه مرة أخرى
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            intent.setPackage(context.packageName) // إجبار نظام أندرويد على توجيه الرابط لداخل ديسكورد
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+        } catch (e: Throwable) {
+            logger.error("Failed to open in app via intent", e)
+            openUrl(context, url) // خطة بديلة
+        }
+    }
+
     private fun openUrl(context: Context, url: String) {
+        bypassedUrl = url 
         try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
         } catch (e: Throwable) {
             try {
-                // محاولة أخيرة بـ AppContext الأساسي
                 val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                 fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 Utils.appContext.startActivity(fallbackIntent)
@@ -211,3 +264,4 @@ class CheckLinks : Plugin() {
         }
     }
 }
+
