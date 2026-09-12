@@ -49,7 +49,7 @@ class AnyRoleMention : Plugin() {
         AnyRoleMentionPluginRef.plugin = null
     }
 
-    // دالة لتنظيف النص العربي لتسهيل البحث (إدارة = ادارة)
+    // دالة لتنظيف النص العربي لضمان نجاح البحث (إدارة = اداره)
     private fun normalizeText(text: String): String {
         return text.lowercase()
             .replace(Regex("[أإآ]"), "ا")
@@ -68,7 +68,10 @@ class AnyRoleMention : Plugin() {
         patcher.patch(method, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 try {
-                    val rawQuery = param.args[0] as? String ?: ""
+                    // سحب النص المكتوب وتنظيفه من علامة @
+                    val rawQuery = param.args[0]?.toString() ?: ""
+                    val cleanQuery = normalizeText(rawQuery).replace("@", "")
+
                     val resultState = param.result ?: return
                     val autocompleteStateClass = Class.forName(VIEWSTATE_AUTOCOMPLETE_CLASS)
                     if (!autocompleteStateClass.isInstance(resultState)) return
@@ -80,15 +83,11 @@ class AnyRoleMention : Plugin() {
                     @Suppress("UNCHECKED_CAST")
                     val currentList = getAutocompletables.invoke(resultState) as List<Any>
 
-                    // 1. فصل الرتب اللي ديسكورد سمح بيها عن باقي العناصر (زي المنشن للأشخاص والقنوات)
-                    val nonRoleItems = ArrayList<Any>()
-                    val discordApprovedRoles = HashMap<Long, Any>()
-
+                    // تسجيل الرتب اللي ديسكورد موافق عليها أصلاً عشان منكررهاش
+                    val alreadyShownRoleIds = HashSet<Long>()
                     for (item in currentList) {
                         if (roleClass.isInstance(item)) {
-                            getRoleId(item)?.let { discordApprovedRoles[it] = item }
-                        } else {
-                            nonRoleItems.add(item)
+                            getRoleId(item)?.let { alreadyShownRoleIds.add(it) }
                         }
                     }
 
@@ -99,38 +98,35 @@ class AnyRoleMention : Plugin() {
                     val allRoles = guildRolesMap.values
 
                     val roleAutoConstructor = roleClass.getConstructor(guildRoleClass, Boolean::class.javaPrimitiveType)
+                    val missingRoles = ArrayList<Any>()
                     
-                    // تنظيف نص البحث وتجهيزه
-                    val cleanQuery = normalizeText(rawQuery.replaceFirst("^@".toRegex(), ""))
-                    val finalRolesToAdd = ArrayList<Any>()
-                    
-                    // 2. فحص كل رتب السيرفر يدوياً (مما يحل مشكلة الـ Dedupe تماماً لأننا بنعتمد على الـ ID)
+                    // البحث في كل رتب السيرفر (بيحل مشكلة التكرار لأننا بنضيف بالـ ID المفقود)
                     for (role in allRoles) {
                         if (role == null) continue
                         val roleId = getRoleIdFromGuildRole(role) ?: continue
-                        val roleName = getRoleDisplayName(role) ?: continue
                         
+                        // لو الرتبة موجودة في القائمة، تخطاها
+                        if (roleId in alreadyShownRoleIds) continue 
+
+                        val roleName = getRoleDisplayName(role) ?: continue
                         val normalizedRoleName = normalizeText(roleName)
                         
-                        // الفلترة بالبحث
+                        // الفلترة بالبحث العربي القوي
                         if (cleanQuery.isEmpty() || normalizedRoleName.contains(cleanQuery)) {
-                            // لو الرتبة ديسكورد أصلاً موافق عليها (يعني ليها صلاحية منشن)
-                            if (discordApprovedRoles.containsKey(roleId)) {
-                                finalRolesToAdd.add(discordApprovedRoles[roleId]!!)
-                            } else {
-                                // لو معندكش صلاحية، هنصنعها إحنا ونحطها بـ False (Silent)
-                                val roleAutoInstance = roleAutoConstructor.newInstance(role, false)
-                                finalRolesToAdd.add(roleAutoInstance)
-                            }
+                            // إضافة الرتبة المخفية كـ (Silent)
+                            val roleAutoInstance = roleAutoConstructor.newInstance(role, false)
+                            missingRoles.add(roleAutoInstance)
                         }
                     }
 
-                    // 3. دمج العناصر لإنشاء القائمة النهائية
-                    val newList = ArrayList<Any>()
-                    newList.addAll(nonRoleItems)
-                    newList.addAll(finalRolesToAdd)
+                    // لو مفيش رتب مخفية مطابقة للبحث، نوقف الشغل
+                    if (missingRoles.isEmpty()) return
 
-                    // 4. إجبار القائمة على الظهور حتى لو ديسكورد كان خافيها بسبب إن نتيجته كانت 0
+                    // دمج قائمة ديسكورد الأصلية (بدون حذف أي شيء) مع الرتب المخفية
+                    val newList = ArrayList(currentList)
+                    newList.addAll(missingRoles)
+
+                    // إجبار القائمة على الظهور لو كانت النتيجة إيجابية
                     val originalIsAutocomplete = autocompleteStateClass.getMethod("isAutocomplete").invoke(resultState) as Boolean
                     val isAutocomplete = if (newList.isNotEmpty()) true else originalIsAutocomplete
 
@@ -139,7 +135,6 @@ class AnyRoleMention : Plugin() {
                     val stickers = autocompleteStateClass.getMethod("getStickers").invoke(resultState)
                     val token = autocompleteStateClass.getMethod("getToken").invoke(resultState)
 
-                    // تحديث الـ State الخاص بالواجهة
                     val copyMethod = autocompleteStateClass.declaredMethods.first { it.name == "copy" && it.parameterTypes.size == 6 }
                     copyMethod.isAccessible = true
                     val newState = copyMethod.invoke(
@@ -271,3 +266,4 @@ class AnyRoleMentionSettings : SettingsPage() {
 object AnyRoleMentionPluginRef {
     var plugin: AnyRoleMention? = null
 }
+
