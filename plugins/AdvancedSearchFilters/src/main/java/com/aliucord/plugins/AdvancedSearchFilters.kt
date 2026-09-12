@@ -1,238 +1,255 @@
 package com.aliucord.plugins
 
 import android.content.Context
-import android.view.View
-import android.view.ViewGroup
 import android.widget.TextView
-import androidx.recyclerview.widget.RecyclerView
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
+import com.aliucord.patcher.after
+import com.aliucord.patcher.before
+import com.discord.simpleast.core.parser.ParseSpec
+import com.discord.simpleast.core.parser.Parser
+import com.discord.simpleast.core.parser.Rule
+import com.discord.stores.StoreSearch
+import com.discord.stores.StoreSearchInput
+import com.discord.utilities.mg_recycler.MGRecyclerDataPayload
+import com.discord.utilities.mg_recycler.SingleTypePayload
+import com.discord.utilities.search.network.SearchFetcher
+import com.discord.utilities.search.network.SearchQuery
 import com.discord.utilities.search.query.FilterType
-import de.robv.android.xposed.XC_MethodHook
+import com.discord.utilities.search.query.node.QueryNode
+import com.discord.utilities.search.query.node.content.ContentNode
+import com.discord.utilities.search.query.node.filter.FilterNode
+import com.discord.utilities.search.query.parsing.QueryParser
+import com.discord.utilities.search.strings.SearchStringProvider
+import com.discord.utilities.search.suggestion.SearchSuggestionEngine
+import com.discord.utilities.search.suggestion.entries.FilterSuggestion
+import com.discord.utilities.search.suggestion.entries.SearchSuggestion
+import com.discord.widgets.search.suggestions.WidgetSearchSuggestionsAdapter
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
+import java.util.regex.Pattern
 
-@AliucordPlugin
+@AliucordPlugin(requiresRestart = false)
 class AdvancedSearchFilters : Plugin() {
 
     companion object {
         val logger = Logger("AdvancedSearchFilters")
-        
-        var FILTER_BEFORE: FilterType? = null
-        var FILTER_AFTER: FilterType? = null
-        var FILTER_ON: FilterType? = null
-        var FILTER_AUTHOR_TYPE: FilterType? = null
     }
 
-    private val originalFiltersMap = HashMap<Int, String>()
+    private val valuesField by lazy {
+        FilterType::class.java.getDeclaredField("\$VALUES").apply { isAccessible = true }
+    }
+    private val rulesField by lazy {
+        Parser::class.java.getDeclaredField("rules").apply { isAccessible = true }
+    }
+    private val replaceAndPublish by lazy {
+        StoreSearchInput::class.java.getDeclaredMethod(
+            "replaceAndPublish",
+            Int::class.javaPrimitiveType!!,
+            List::class.java,
+            List::class.java,
+        ).apply { isAccessible = true }
+    }
+
+    private val placeholder by lazy { Utils.getResId("search_filter_from", "string") }
+    private var origFilterTypes: Array<FilterType>? = null
 
     override fun start(context: Context) {
         try {
-            injectCustomFilters()
-            patchSearchSuggestionEngine()
-            patchSearchStringProvider()
-            patchFilterViewHolder()
+            extendFilterType()
+            SearchFilterTypes.ready = true
+            patchQueryParser()
+            patchSuggestionUi()
+            patchFilterClicked()
+            patchAuthorTypeFilter()
         } catch (e: Throwable) {
+            SearchFilterTypes.ready = false
             logger.error("فشل تهيئة فلاتر البحث", e)
         }
     }
 
     override fun stop(context: Context) {
         patcher.unpatchAll()
-        originalFiltersMap.clear()
-    }
-
-    /**
-     * 1. حقن الفلاتر الجديدة داخل FilterType Enum أثناء التشغيل
-     */
-    private fun injectCustomFilters() {
-        val filterClass = FilterType::class.java
-        FILTER_BEFORE = addEnum(filterClass, "BEFORE", 4)
-        FILTER_AFTER = addEnum(filterClass, "AFTER", 5)
-        FILTER_ON = addEnum(filterClass, "ON", 6)
-        FILTER_AUTHOR_TYPE = addEnum(filterClass, "AUTHOR_TYPE", 7)
+        SearchFilterTypes.ready = false
+        val stock = origFilterTypes
+        if (stock != null) {
+            valuesField.set(null, stock)
+        }
+        origFilterTypes = null
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun <T : Enum<T>> addEnum(enumType: Class<T>, name: String, ordinal: Int): T? {
-        return try {
-            val constructor = enumType.getDeclaredConstructor(String::class.java, Int::class.javaPrimitiveType)
-            constructor.isAccessible = true
-            val newEnum = constructor.newInstance(name, ordinal) as T
+    private fun extendFilterType() {
+        val values = valuesField.get(null) as Array<FilterType>
+        origFilterTypes = origFilterTypes ?: values
 
-            val valuesField: Field = enumType.getDeclaredField("\$VALUES")
-            valuesField.isAccessible = true
-            
-            val modifiersField = Field::class.java.getDeclaredField("accessFlags")
-            modifiersField.isAccessible = true
-            modifiersField.setInt(valuesField, valuesField.modifiers and Modifier.FINAL.inv())
+        val constructor = FilterType::class.java.declaredConstructors[0].apply { isAccessible = true }
+        var next = values.size
+        SearchFilterTypes.BEFORE = constructor.newInstance("BEFORE", next++) as FilterType
+        SearchFilterTypes.AFTER = constructor.newInstance("AFTER", next++) as FilterType
+        SearchFilterTypes.ON = constructor.newInstance("ON", next++) as FilterType
+        SearchFilterTypes.AUTHOR_TYPE = constructor.newInstance("AUTHOR_TYPE", next++) as FilterType
 
-            val oldValues = valuesField.get(null) as Array<T>
-            val newValues = java.lang.reflect.Array.newInstance(enumType, oldValues.size + 1) as Array<T>
-            System.arraycopy(oldValues, 0, newValues, 0, oldValues.size)
-            newValues[oldValues.size] = newEnum
-            
-            valuesField.set(null, newValues)
-            newEnum
-        } catch (e: Exception) {
-            logger.error("فشل حقن $name", e)
-            null
+        valuesField.set(null, values + arrayOf(SearchFilterTypes.BEFORE, SearchFilterTypes.AFTER, SearchFilterTypes.ON, SearchFilterTypes.AUTHOR_TYPE))
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun patchQueryParser() {
+        patcher.after<QueryParser>(SearchStringProvider::class.java) {
+            val rules = rulesField.get(this) as ArrayList<Rule<Context, QueryNode, Any>>
+            rules.addAll(
+                0,
+                listOf(
+                    filterMarkerRule("before", SearchFilterTypes.BEFORE),
+                    filterMarkerRule("after", SearchFilterTypes.AFTER),
+                    filterMarkerRule("on", SearchFilterTypes.ON),
+                    filterMarkerRule("type", SearchFilterTypes.AUTHOR_TYPE),
+                    dateAnswerRule(),
+                    authorTypeAnswerRule(),
+                ),
+            )
         }
     }
 
-    /**
-     * 2. إضافة الفلاتر لقائمة الاقتراحات Search Options
-     */
-    private fun patchSearchSuggestionEngine() {
-        val engineClass = Class.forName("com.discord.utilities.search.suggestion.SearchSuggestionEngine")
-        val getFilterMethod = engineClass.declaredMethods.firstOrNull { it.name == "getFilterSuggestions" } ?: return
-        
-        patcher.patch(getFilterMethod, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val currentSuggestions = ArrayList<Any>()
-                val resultList = param.result as? Collection<*>
-                if (resultList != null) {
-                    currentSuggestions.addAll(resultList.filterNotNull())
-                }
-                
-                val filterClass = Class.forName("com.discord.utilities.search.suggestion.entries.FilterSuggestion")
-                val constructor = filterClass.getDeclaredConstructor(FilterType::class.java)
-                constructor.isAccessible = true
-                
-                if (FILTER_ON != null) currentSuggestions.add(constructor.newInstance(FILTER_ON))
-                if (FILTER_BEFORE != null) currentSuggestions.add(constructor.newInstance(FILTER_BEFORE))
-                if (FILTER_AFTER != null) currentSuggestions.add(constructor.newInstance(FILTER_AFTER))
-                if (FILTER_AUTHOR_TYPE != null) currentSuggestions.add(constructor.newInstance(FILTER_AUTHOR_TYPE))
-                
-                param.result = currentSuggestions
-            }
-        })
+    private fun filterMarkerRule(keyword: String, type: FilterType): ParserRule {
+        val pattern = Pattern.compile("^\\s*?($keyword):", Pattern.UNICODE_CASE)
+        return QueryRule(pattern) { _, state -> ParseSpec(FilterNode(type, keyword), state) }
     }
 
-    /**
-     * 3. تزويد ديسكورد بالنصوص الرسمية ليتعرف عليها المحرك بشكل آمن
-     */
-    private fun patchSearchStringProvider() {
-        val providerClass = Class.forName("com.discord.utilities.search.strings.SearchStringProvider")
-        
-        patcher.patch(providerClass.getDeclaredMethod("getFilterText", FilterType::class.java), object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                // الاعتماد على الاسم كنص لتفادي كراش الذاكرة واختلاف الـ Classloaders
-                val filterName = (param.args[0] as? Enum<*>)?.name ?: return
-                when (filterName) {
-                    "BEFORE" -> param.result = "before:"
-                    "AFTER" -> param.result = "after:"
-                    "ON" -> param.result = "on:"
-                    "AUTHOR_TYPE" -> param.result = "type:"
-                }
-            }
-        })
-        
-        patcher.patch(providerClass.getDeclaredMethod("getFilterTextId", FilterType::class.java), object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val filterName = (param.args[0] as? Enum<*>)?.name ?: return
-                when (filterName) {
-                    "BEFORE", "AFTER", "ON", "AUTHOR_TYPE" -> {
-                        param.result = Utils.getResId("search_filter_from", "string")
-                    }
-                }
-            }
-        })
+    private fun dateAnswerRule(): ParserRule {
+        val pattern = Pattern.compile("^\\s*(\\d{4}-\\d{2}-\\d{2})\\b")
+        return QueryRule(pattern) { matcher, state -> ParseSpec(DateAnswerNode(matcher.group(1)!!), state) }
     }
 
-    /**
-     * 4. خدعة التنكر الآمنة لواجهة المستخدم
-     */
-    private fun patchFilterViewHolder() {
-        val vhClass = Class.forName("com.discord.widgets.search.suggestions.WidgetSearchSuggestionsAdapter\$FilterViewHolder")
-        val suggestionClass = Class.forName("com.discord.utilities.search.suggestion.entries.FilterSuggestion")
-        
-        patcher.patch(vhClass.getDeclaredMethod("onConfigure", Int::class.javaPrimitiveType, suggestionClass), object : XC_MethodHook() {
+    private fun authorTypeAnswerRule(): ParserRule {
+        val pattern = Pattern.compile("^\\s*(user|bot|webhook)\\b", Pattern.CASE_INSENSITIVE)
+        return QueryRule(pattern) { matcher, state -> ParseSpec(AuthorTypeAnswerNode(matcher.group(1)!!), state) }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun patchSuggestionUi() {
+        patcher.after<SearchSuggestionEngine>(
+            "getFilterSuggestions",
+            CharSequence::class.java,
+            SearchStringProvider::class.java,
+            Boolean::class.javaPrimitiveType!!,
+        ) { (param, _: CharSequence) ->
+            if (!SearchFilterTypes.ready) return@after
+            val final = (param.result as List<SearchSuggestion>).toMutableList()
+            SearchFilterTypes.all().forEach { final.add(FilterSuggestion(it)) }
+            param.result = final
+        }
+
+        for (method in arrayOf("getFilterText", "getFilterTextId")) {
+            patcher.before<WidgetSearchSuggestionsAdapter.FilterViewHolder>(
+                method,
+                FilterType::class.java,
+            ) { (param, type: FilterType) ->
+                val keyword = SearchFilterTypes.keywordFor(type) ?: return@before
+                param.result = if (method == "getFilterText") "$keyword:" else placeholder
+            }
+        }
+
+        patcher.after<WidgetSearchSuggestionsAdapter.FilterViewHolder>(
+            "onConfigure",
+            Int::class.javaPrimitiveType!!,
+            MGRecyclerDataPayload::class.java,
+        ) { (_, _: Int, payload: SingleTypePayload<*>) ->
+            val data = payload.data
+            if (data !is FilterSuggestion) return@after
+            val label = SearchFilterTypes.labelFor(data.filterType) ?: return@after
+            val textViewId = Utils.getResId("suggestion_example_filter", "id")
+            itemView.findViewById<TextView>(textViewId)?.text = label
+        }
+    }
+
+    private fun patchFilterClicked() {
+        patcher.before<StoreSearchInput>(
+            "onFilterClicked",
+            FilterType::class.java,
+            SearchStringProvider::class.java,
+            List::class.java,
+        ) { (param, type: FilterType, _: SearchStringProvider, query: List<QueryNode>) ->
+            val keyword = SearchFilterTypes.keywordFor(type) ?: return@before
+            val index = when {
+                query.isEmpty() -> 0
+                query.last() is ContentNode -> query.lastIndex
+                else -> query.size
+            }
+            replaceAndPublish.invoke(this, index, listOf(FilterNode(type, keyword)), query)
+            param.result = null
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun patchAuthorTypeFilter() {
+        patcher.after<SearchFetcher>(
+            "makeQuery",
+            StoreSearch.SearchTarget::class.java,
+            Long::class.javaObjectType,
+            SearchQuery::class.java,
+        ) { (param, _: StoreSearch.SearchTarget, _: Long?, query: SearchQuery) ->
+            val wantedType = query.params["author_type"]?.firstOrNull()?.lowercase() ?: return@after
+            val original = param.result as? rx.Observable<Any> ?: return@after
+            param.result = original.map { response -> filterByAuthorType(response, wantedType) }
+        }
+    }
+
+    private fun filterByAuthorType(response: Any?, wantedType: String): Any? {
+        if (response == null) return response
+        return try {
+            val messagesField = response.javaClass.getDeclaredField("messages").apply { isAccessible = true }
+            val originalMessages = messagesField.get(response) as? List<*> ?: return response
             
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val suggestion = param.args[1] ?: return
+            val filtered = originalMessages.filter { hitList ->
+                val messages = hitList as? List<*> ?: return@filter true
+                val targetMsg = messages.firstOrNull { msg ->
+                    if (msg == null) return@firstOrNull false
+                    val hitField = msg.javaClass.getDeclaredField("hit").apply { isAccessible = true }
+                    (hitField.get(msg) as? Boolean) == true
+                } ?: messages.firstOrNull()
                 
-                for (field in suggestion.javaClass.declaredFields) {
-                    field.isAccessible = true
-                    val value = field.get(suggestion)
-                    if (value is Enum<*>) {
-                        val filterName = value.name
-                        if (filterName == "BEFORE" || filterName == "AFTER" || filterName == "ON" || filterName == "AUTHOR_TYPE") {
-                            // حفظ اسم الفلتر الأصلي للعودة إليه لاحقاً
-                            originalFiltersMap[param.thisObject.hashCode()] = filterName
-                            
-                            // التنكر: تحويله مؤقتاً إلى FROM حتى تقبله الواجهة
-                            val fallback = java.lang.Enum.valueOf(value.javaClass, "FROM")
-                            field.set(suggestion, fallback)
-                            break
-                        }
-                    }
-                }
+                matchesAuthorType(targetMsg, wantedType)
             }
+
+            val modifiersField = Field::class.java.getDeclaredField("accessFlags").apply { isAccessible = true }
+            modifiersField.setInt(messagesField, messagesField.modifiers and Modifier.FINAL.inv())
+            messagesField.set(response, filtered)
             
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val originalName = originalFiltersMap.remove(param.thisObject.hashCode()) ?: return
-                val suggestion = param.args[1] ?: return
-                
-                // استرجاع الفلتر الأصلي بعد انتهاء الواجهة من الرسم
-                for (field in suggestion.javaClass.declaredFields) {
-                    field.isAccessible = true
-                    val value = field.get(suggestion)
-                    if (value is Enum<*> && value.name == "FROM") {
-                        val originalEnum = when (originalName) {
-                            "BEFORE" -> FILTER_BEFORE
-                            "AFTER" -> FILTER_AFTER
-                            "ON" -> FILTER_ON
-                            "AUTHOR_TYPE" -> FILTER_AUTHOR_TYPE
-                            else -> null
-                        }
-                        if (originalEnum != null) {
-                            field.set(suggestion, originalEnum)
-                        }
-                        break
-                    }
-                }
-                
-                // تعديل النصوص لتطابق الفلتر الجديد
-                val customText = when (originalName) {
-                    "BEFORE" -> "Before a date"
-                    "AFTER" -> "After a date"
-                    "ON" -> "Sent on a date"
-                    "AUTHOR_TYPE" -> "By author type"
-                    else -> null
-                }
-                
-                val customHint = when (originalName) {
-                    "BEFORE", "AFTER", "ON" -> "date"
-                    "AUTHOR_TYPE" -> "user, bot, or webhook"
-                    else -> null
-                }
-                
-                if (customText != null) {
-                    val holder = param.thisObject as RecyclerView.ViewHolder
-                    val fallbackString = holder.itemView.context.getString(Utils.getResId("search_filter_from", "string"))
-                    
-                    updateCustomTextView(holder.itemView, fallbackString, customText)
-                    
-                    if (customHint != null) {
-                        updateCustomTextView(holder.itemView, "user", customHint)
-                    }
-                }
-            }
-        })
+            response
+        } catch (e: Throwable) {
+            logger.error("فشل فلترة type: - هترجع النتائج كاملة", e)
+            response
+        }
     }
 
-    private fun updateCustomTextView(view: View, oldText: String, newText: String) {
-        if (view is TextView) {
-            if (view.text.toString() == oldText) {
-                view.text = newText
+    private fun matchesAuthorType(entry: Any?, wantedType: String): Boolean {
+        if (entry == null) return true
+        return try {
+            val authorField = entry.javaClass.getDeclaredField("author").apply { isAccessible = true }
+            val author = authorField.get(entry) ?: return true
+            
+            var isBot = false
+            try {
+                val botMethod = author.javaClass.methods.firstOrNull { it.name.contains("bot", ignoreCase = true) && (it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType) }
+                if (botMethod != null) {
+                    isBot = botMethod.invoke(author) as? Boolean ?: false
+                }
+            } catch (e: Throwable) {}
+            
+            val webhookIdField = entry.javaClass.getDeclaredField("webhookId").apply { isAccessible = true }
+            val webhookId = webhookIdField.get(entry)
+
+            when (wantedType) {
+                "bot" -> isBot && webhookId == null
+                "webhook" -> webhookId != null
+                "user" -> !isBot && webhookId == null
+                else -> true
             }
-        } else if (view is ViewGroup) {
-            for (i in 0 until view.childCount) {
-                updateCustomTextView(view.getChildAt(i), oldText, newText)
-            }
+        } catch (e: Throwable) {
+            true
         }
     }
 }
