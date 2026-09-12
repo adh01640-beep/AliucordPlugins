@@ -3,6 +3,7 @@ package com.aliucord.plugins
 import android.annotation.SuppressLint
 import android.content.Context
 import android.view.View
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -11,6 +12,7 @@ import android.widget.TextView
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
+import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.Http
@@ -26,18 +28,33 @@ class SmartProfileEditor : Plugin() {
         val logger = Logger("SmartProfileEditor")
     }
 
+    // لا زلنا نحتفظ بمسار الإعدادات كاحتياطي
     init {
         settingsTab = SettingsTab(SmartProfileSettings::class.java)
     }
 
-    override fun start(context: Context) {}
-    override fun stop(context: Context) {}
+    override fun start(context: Context) {
+        // تسجيل أمر السلاش لفتح الواجهة من أي مكان بسهولة
+        commands.registerCommand(
+            "editprofile",
+            "Open the Smart Profile Editor (Global & Server Profiles)",
+            emptyList()
+        ) {
+            Utils.openPageWithProxy(Utils.appActivity, SmartProfileSettings())
+            CommandsAPI.CommandResult()
+        }
+    }
+
+    override fun stop(context: Context) {
+        commands.unregisterAll()
+    }
 }
 
 @SuppressLint("SetTextI18n")
 class SmartProfileSettings : SettingsPage() {
     private val decoMap = LinkedHashMap<String, String>()
     private val effectMap = LinkedHashMap<String, String>()
+    private var currentGuildId: Long = 0L
 
     override fun onViewBound(view: View) {
         super.onViewBound(view)
@@ -47,128 +64,82 @@ class SmartProfileSettings : SettingsPage() {
         decoMap["None"] = ""
         effectMap["None"] = ""
 
+        // جلب أيدي السيرفر الحالي (لو كنت داخل سيرفر)
+        currentGuildId = StoreStream.getGuildSelected().selectedGuildId
+
         val scrollView = ScrollView(ctx)
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
         }
 
-        val displayNameInput = TextInput(ctx, "Display Name")
+        // --- نظام التفرقة بين الجلوبال والسيرفر ---
+        val profileTypeLabel = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_TextView).apply { 
+            text = "Editing Target:" 
+            textSize = 16f
+            setPadding(0, 0, 0, 8)
+        }
+        val profileTypeSpinner = Spinner(ctx)
+        val profileTypes = mutableListOf("Global Profile (Default)")
+        
+        if (currentGuildId != 0L) {
+            profileTypes.add("Server Profile (Current Server)")
+        }
+        profileTypeSpinner.adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, profileTypes)
+
+        // --- الحقول ---
+        val displayNameInput = TextInput(ctx, "Display Name / Server Nickname")
         val pronounsInput = TextInput(ctx, "Pronouns")
         val bioInput = TextInput(ctx, "Bio")
         val primaryColorInput = TextInput(ctx, "Primary Color (Hex, e.g. #000000)")
         val accentColorInput = TextInput(ctx, "Accent Color (Hex, e.g. #FFFF00)")
 
-        val decoLabel = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_TextView).apply { text = "Avatar Decoration" }
+        val decoLabel = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_TextView).apply { text = "Avatar Decoration"; setPadding(0, 16, 0, 0) }
         val decoSpinner = Spinner(ctx)
         
-        val effectLabel = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_TextView).apply { text = "Profile Effect" }
+        val effectLabel = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_TextView).apply { text = "Profile Effect"; setPadding(0, 16, 0, 0) }
         val effectSpinner = Spinner(ctx)
 
+        // إضافة العناصر للواجهة
+        layout.addView(profileTypeLabel)
+        layout.addView(profileTypeSpinner)
         layout.addView(displayNameInput)
         layout.addView(pronounsInput)
         layout.addView(bioInput)
         layout.addView(primaryColorInput)
         layout.addView(accentColorInput)
-        
         layout.addView(decoLabel)
         layout.addView(decoSpinner)
         layout.addView(effectLabel)
         layout.addView(effectSpinner)
 
-        // Fetch Shop Catalog to populate Spinners
+        // جلب المقتنيات
         fetchCollectibles(ctx, decoSpinner, effectSpinner)
 
+        // --- زر تحميل البيانات الحالية ---
         val loadBtn = Button(ctx).apply {
             text = "Load Current Data"
             setOnClickListener {
-                Utils.threadPool.execute {
-                    try {
-                        val token = StoreStream.getAuthentication().authToken
-                        val req = Http.Request("https://discord.com/api/v9/users/@me/profile?with_mutual_guilds=false", "GET")
-                            .setHeader("Authorization", token)
-                        val res = req.execute()
-
-                        if (res.statusCode == 200) {
-                            val json = JSONObject(res.text())
-                            val userObj = json.optJSONObject("user")
-                            val profileObj = json.optJSONObject("user_profile")
-
-                            Utils.mainThread.post {
-                                userObj?.optString("global_name", "")?.let { displayNameInput.editText.setText(it) }
-                                profileObj?.optString("pronouns", "")?.let { pronounsInput.editText.setText(it) }
-                                profileObj?.optString("bio", "")?.let { bioInput.editText.setText(it) }
-
-                                val colors = profileObj?.optJSONArray("theme_colors")
-                                if (colors != null && colors.length() == 2) {
-                                    primaryColorInput.editText.setText(String.format("#%06X", 0xFFFFFF and colors.getInt(0)))
-                                    accentColorInput.editText.setText(String.format("#%06X", 0xFFFFFF and colors.getInt(1)))
-                                }
-                                Utils.showToast("Profile data loaded!")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Utils.mainThread.post { Utils.showToast("Failed to load data") }
-                    }
-                }
+                val isServer = profileTypeSpinner.selectedItemPosition == 1
+                loadCurrentProfileData(isServer, displayNameInput, pronounsInput, bioInput, primaryColorInput, accentColorInput)
             }
         }
 
+        // --- زر الحفظ ---
         val saveBtn = Button(ctx).apply {
             text = "Save Profile"
             setOnClickListener {
-                Utils.threadPool.execute {
-                    try {
-                        val token = StoreStream.getAuthentication().authToken
-                        val json = JSONObject()
-
-                        val dName = displayNameInput.editText.text.toString()
-                        if (dName.isNotEmpty()) json.put("global_name", dName)
-
-                        json.put("pronouns", pronounsInput.editText.text.toString())
-                        json.put("bio", bioInput.editText.text.toString())
-
-                        val selectedDecoName = decoSpinner.selectedItem?.toString() ?: "None"
-                        val selectedEffectName = effectSpinner.selectedItem?.toString() ?: "None"
-                        
-                        val decoId = decoMap[selectedDecoName] ?: ""
-                        val effectId = effectMap[selectedEffectName] ?: ""
-                        
-                        if (decoId.isNotEmpty()) json.put("avatar_decoration_id", decoId)
-                        if (effectId.isNotEmpty()) json.put("profile_effect_id", effectId)
-
-                        val pColor = primaryColorInput.editText.text.toString()
-                        val aColor = accentColorInput.editText.text.toString()
-                        if (pColor.isNotEmpty() && aColor.isNotEmpty()) {
-                            try {
-                                val pInt = android.graphics.Color.parseColor(pColor)
-                                val aInt = android.graphics.Color.parseColor(aColor)
-                                json.put("theme_colors", JSONArray().put(pInt).put(aInt))
-                            } catch (e: Exception) {
-                                Utils.mainThread.post { Utils.showToast("Invalid Color Format! Use #RRGGBB") }
-                                return@execute
-                            }
-                        }
-
-                        val request = Http.Request("https://discord.com/api/v9/users/@me", "PATCH")
-                            .setHeader("Authorization", token)
-                            .setHeader("Content-Type", "application/json")
-
-                        val response = request.executeWithBody(json.toString())
-
-                        Utils.mainThread.post {
-                            if (response.statusCode in 200..299) {
-                                Utils.showToast("Profile saved successfully!")
-                            } else {
-                                val errorMsg = "Error ${response.statusCode}: ${response.text()}"
-                                Utils.showToast(errorMsg)
-                                SmartProfileEditor.logger.error(errorMsg, null)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Utils.mainThread.post { Utils.showToast("Request Failed: ${e.message}") }
-                    }
-                }
+                val isServer = profileTypeSpinner.selectedItemPosition == 1
+                saveProfileData(
+                    isServer, 
+                    displayNameInput.editText.text.toString(),
+                    pronounsInput.editText.text.toString(),
+                    bioInput.editText.text.toString(),
+                    decoSpinner.selectedItem?.toString() ?: "None",
+                    effectSpinner.selectedItem?.toString() ?: "None",
+                    primaryColorInput.editText.text.toString(),
+                    accentColorInput.editText.text.toString()
+                )
             }
         }
 
@@ -178,10 +149,136 @@ class SmartProfileSettings : SettingsPage() {
         addView(scrollView)
     }
 
+    private fun loadCurrentProfileData(
+        isServer: Boolean,
+        nameInput: TextInput,
+        pronounsInput: TextInput,
+        bioInput: TextInput,
+        pColorInput: TextInput,
+        aColorInput: TextInput
+    ) {
+        Utils.threadPool.execute {
+            try {
+                // إصلاح خطأ authToken باستخدام token
+                val token = StoreStream.getAuthentication().token
+                val url = if (isServer && currentGuildId != 0L) {
+                    "https://discord.com/api/v9/users/@me/profile?with_mutual_guilds=false&guild_id=$currentGuildId"
+                } else {
+                    "https://discord.com/api/v9/users/@me/profile?with_mutual_guilds=false"
+                }
+
+                val req = Http.Request(url, "GET").setHeader("Authorization", token)
+                val res = req.execute()
+
+                if (res.statusCode == 200) {
+                    val json = JSONObject(res.text())
+                    val userObj = json.optJSONObject("user")
+                    
+                    // تحديد من أين نقرأ البيانات (الجلوبال أو السيرفر)
+                    val targetObj = if (isServer && json.has("guild_member_profile")) {
+                        json.optJSONObject("guild_member_profile")
+                    } else {
+                        json.optJSONObject("user_profile")
+                    }
+                    
+                    val memberObj = json.optJSONObject("guild_member")
+
+                    Utils.mainThread.post {
+                        // استخراج الاسم (Nick للسيرفر، Global للأساسي)
+                        val name = if (isServer) memberObj?.optString("nick", "") else userObj?.optString("global_name", "")
+                        if (!name.isNullOrEmpty() && name != "null") nameInput.editText.setText(name)
+
+                        targetObj?.optString("pronouns", "")?.takeIf { it != "null" }?.let { pronounsInput.editText.setText(it) }
+                        targetObj?.optString("bio", "")?.takeIf { it != "null" }?.let { bioInput.editText.setText(it) }
+
+                        val colors = targetObj?.optJSONArray("theme_colors")
+                        if (colors != null && colors.length() == 2) {
+                            pColorInput.editText.setText(String.format("#%06X", 0xFFFFFF and colors.getInt(0)))
+                            aColorInput.editText.setText(String.format("#%06X", 0xFFFFFF and colors.getInt(1)))
+                        }
+                        Utils.showToast(if (isServer) "Server Profile loaded!" else "Global Profile loaded!")
+                    }
+                }
+            } catch (e: Exception) {
+                Utils.mainThread.post { Utils.showToast("Failed to load data") }
+            }
+        }
+    }
+
+    private fun saveProfileData(
+        isServer: Boolean,
+        name: String,
+        pronouns: String,
+        bio: String,
+        decoName: String,
+        effectName: String,
+        pColor: String,
+        aColor: String
+    ) {
+        Utils.threadPool.execute {
+            try {
+                // إصلاح خطأ authToken باستخدام token
+                val token = StoreStream.getAuthentication().token
+                val json = JSONObject()
+
+                // التفرقة في أسماء الحقول بناءً على نوع البروفايل
+                if (name.isNotEmpty()) {
+                    if (isServer) json.put("nick", name) else json.put("global_name", name)
+                }
+
+                if (pronouns.isNotEmpty()) json.put("pronouns", pronouns)
+                if (bio.isNotEmpty()) json.put("bio", bio)
+
+                val decoId = decoMap[decoName] ?: ""
+                val effectId = effectMap[effectName] ?: ""
+                
+                if (decoId.isNotEmpty()) json.put("avatar_decoration_id", decoId)
+                if (effectId.isNotEmpty()) json.put("profile_effect_id", effectId)
+
+                if (pColor.isNotEmpty() && aColor.isNotEmpty()) {
+                    try {
+                        val pInt = android.graphics.Color.parseColor(pColor)
+                        val aInt = android.graphics.Color.parseColor(aColor)
+                        json.put("theme_colors", JSONArray().put(pInt).put(aInt))
+                    } catch (e: Exception) {
+                        Utils.mainThread.post { Utils.showToast("Invalid Color Format! Use #RRGGBB") }
+                        return@execute
+                    }
+                }
+
+                // التفرقة في رابط الـ API بناءً على الاختيار
+                val url = if (isServer && currentGuildId != 0L) {
+                    "https://discord.com/api/v9/guilds/$currentGuildId/members/@me"
+                } else {
+                    "https://discord.com/api/v9/users/@me"
+                }
+
+                val request = Http.Request(url, "PATCH")
+                    .setHeader("Authorization", token)
+                    .setHeader("Content-Type", "application/json")
+
+                val response = request.executeWithBody(json.toString())
+
+                Utils.mainThread.post {
+                    if (response.statusCode in 200..299) {
+                        Utils.showToast("Profile saved successfully!")
+                    } else {
+                        val errorMsg = "Error ${response.statusCode}: ${response.text()}"
+                        Utils.showToast(errorMsg)
+                        SmartProfileEditor.logger.error(errorMsg, null)
+                    }
+                }
+            } catch (e: Exception) {
+                Utils.mainThread.post { Utils.showToast("Request Failed: ${e.message}") }
+            }
+        }
+    }
+
     private fun fetchCollectibles(ctx: Context, decoSpinner: Spinner, effectSpinner: Spinner) {
         Utils.threadPool.execute {
             try {
-                val token = StoreStream.getAuthentication().authToken
+                // إصلاح خطأ authToken باستخدام token
+                val token = StoreStream.getAuthentication().token
                 val req = Http.Request("https://discord.com/api/v9/collectibles/categories", "GET")
                     .setHeader("Authorization", token)
                 val res = req.execute()
