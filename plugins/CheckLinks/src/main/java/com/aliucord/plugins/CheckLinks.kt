@@ -38,26 +38,41 @@ class CheckLinks : Plugin() {
 
         try {
             val uriHandlerClass = Class.forName("com.discord.utilities.uri.UriHandler")
-            // Robust method selection using name and parameter count to avoid Kotlin default argument issues
-            val handleMethod = uriHandlerClass.declaredMethods.firstOrNull { 
-                it.name == "handle" && it.parameterTypes.size >= 2 
+            
+            // Universal Hook: Catch ALL routing methods (handle, handle$default, openUrl, etc.)
+            val methods = uriHandlerClass.declaredMethods.filter { 
+                it.name.startsWith("handle") || it.name.startsWith("openUrl")
             }
 
-            if (handleMethod != null) {
-                patcher.patch(handleMethod, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val contextObj = param.args.getOrNull(0) as? Context ?: return
-                        val url = param.args.getOrNull(1) as? String ?: return
+            if (methods.isEmpty()) {
+                logger.error("No URL handling methods found in UriHandler!", null)
+                return
+            }
 
-                        // Intercept and halt the original open action until scan finishes
-                        param.result = null
+            for (method in methods) {
+                patcher.patch(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        // Dynamically find the URL argument regardless of the method signature
+                        val url = param.args.firstOrNull { 
+                            it is String && (it.startsWith("http://") || it.startsWith("https://")) 
+                        } as? String ?: return
+
+                        // Ignore Discord internal deep links (e.g. mentions, channels)
+                        if (url.contains("discord.com/channels") || url.contains("discordapp.com/channels")) {
+                            return
+                        }
+
+                        // Halt Discord's default behavior completely
+                        param.result = null 
+                        
+                        // Use AppActivity to ensure Dialogs don't crash the WindowManager
+                        val activityContext = Utils.appActivity ?: param.args.firstOrNull { it is Context } as? Context ?: return
+
                         mainHandler.post {
-                            handleLinkClick(contextObj, url)
+                            handleLinkClick(activityContext, url)
                         }
                     }
                 })
-            } else {
-                logger.error("Could not find UriHandler.handle method", null)
             }
         } catch (e: Throwable) {
             logger.error("Failed to initialize CheckLinks hook", e)
