@@ -88,7 +88,13 @@ class AdvancedSearchFilters : Plugin() {
         
         patcher.patch(getFilterMethod, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
-                val currentSuggestions = (param.result as? List<*>)?.toMutableList() ?: mutableListOf<Any>()
+                // الحل الجذري لمشكلة out projection في Kotlin
+                val currentSuggestions = ArrayList<Any>()
+                
+                val resultList = param.result as? Collection<*>
+                if (resultList != null) {
+                    currentSuggestions.addAll(resultList.filterNotNull())
+                }
                 
                 val filterClass = Class.forName("com.discord.utilities.search.suggestion.entries.FilterSuggestion")
                 val constructor = filterClass.getDeclaredConstructor(FilterType::class.java)
@@ -110,7 +116,6 @@ class AdvancedSearchFilters : Plugin() {
     private fun patchSearchStringProvider() {
         val providerClass = Class.forName("com.discord.utilities.search.strings.SearchStringProvider")
         
-        // ربط الفلتر بكلمة البحث (مثال: before:)
         patcher.patch(providerClass.getDeclaredMethod("getFilterText", FilterType::class.java), object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 when (param.args[0]) {
@@ -122,7 +127,6 @@ class AdvancedSearchFilters : Plugin() {
             }
         })
         
-        // إرجاع ID وهمي لتجنب كراش الموارد (Resources NotFound)
         patcher.patch(providerClass.getDeclaredMethod("getFilterTextId", FilterType::class.java), object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 when (param.args[0]) {
@@ -163,7 +167,6 @@ class AdvancedSearchFilters : Plugin() {
         })
     }
 
-    // استبدال النص الوهمي بالنص الفعلي داخل العنصر
     private fun updateCustomTextView(view: View, oldText: String, newText: String) {
         if (view is TextView) {
             if (view.text.toString() == oldText) {
