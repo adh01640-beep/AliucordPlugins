@@ -79,28 +79,26 @@ class AnyRoleMention : Plugin() {
                         }
                     }
 
-                    // الجلب الصحيح للرتب متوافق مع Aliucord Stubs
                     val guildId = StoreStream.getGuildSelected().selectedGuildId
                     if (guildId == 0L) return
 
-                    val guild = StoreStream.getGuilds().getGuild(guildId) ?: return
-                    val allRoles = guild.roles?.values ?: return
+                    // الحل الجذري لمشكلة الكومبايلر: تعريف الـ Map بشكل صريح
+                    val guildRolesMap = StoreStream.getGuilds().roles[guildId] as? java.util.Map<*, *> ?: return
+                    val allRoles = guildRolesMap.values
 
                     val roleAutoConstructor = roleClass.getConstructor(guildRoleClass, Boolean::class.javaPrimitiveType)
                     
-                    // تنظيف نص البحث من الـ @ والمقارنة اليدوية
                     val cleanQuery = query.replace("@", "").lowercase()
                     val missingRoles = ArrayList<Any>()
                     
                     for (role in allRoles) {
+                        if (role == null) continue
                         val roleId = getRoleIdFromGuildRole(role) ?: continue
                         if (roleId in alreadyShownRoleIds) continue 
 
                         val roleName = getRoleDisplayName(role) ?: continue
                         
-                        // الفلترة الخاصة بالبلوقن
                         if (cleanQuery.isEmpty() || roleName.lowercase().contains(cleanQuery)) {
-                            // إضافة الرتبة بصلاحية false (Silent)
                             val roleAutoInstance = roleAutoConstructor.newInstance(role, false)
                             missingRoles.add(roleAutoInstance)
                         }
@@ -248,3 +246,4 @@ class AnyRoleMentionSettings : SettingsPage() {
 object AnyRoleMentionPluginRef {
     var plugin: AnyRoleMention? = null
 }
+
