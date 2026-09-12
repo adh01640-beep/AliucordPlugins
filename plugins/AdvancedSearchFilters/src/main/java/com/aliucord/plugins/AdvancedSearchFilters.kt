@@ -163,17 +163,17 @@ class AdvancedSearchFilters : Plugin() {
             param.result = final
         }
 
-        // NOTE: the real methods are "getFilterText" and "getAnswerText" — there is
-        // no "getFilterTextId" on FilterViewHolder. Using a nonexistent method name
-        // here previously threw NoSuchMethodException during start(), which made
-        // SearchFilterTypes.ready stay false and silently disabled every filter.
+        // Both getFilterText and getAnswerText return an Int (a string resource id),
+        // NOT a String/CharSequence. Returning a raw String here throws
+        // ClassCastException: String cannot be cast to Integer at the LSP hook site.
+        // The actual per-filter label is shown separately via onConfigure below.
         for (method in arrayOf("getFilterText", "getAnswerText")) {
             patcher.before<WidgetSearchSuggestionsAdapter.FilterViewHolder>(
                 method,
                 FilterType::class.java,
             ) { (param, type: FilterType) ->
-                val keyword = SearchFilterTypes.keywordFor(type) ?: return@before
-                param.result = if (method == "getFilterText") "$keyword:" else placeholder
+                if (!SearchFilterTypes.isOurs(type)) return@before
+                param.result = placeholder
             }
         }
 
