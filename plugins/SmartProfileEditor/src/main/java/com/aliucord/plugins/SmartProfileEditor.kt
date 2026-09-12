@@ -3,7 +3,6 @@ package com.aliucord.plugins
 import android.annotation.SuppressLint
 import android.content.Context
 import android.view.View
-import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -53,6 +52,20 @@ class SmartProfileSettings : SettingsPage() {
     private val decoMap = LinkedHashMap<String, String>()
     private val effectMap = LinkedHashMap<String, String>()
     private var currentGuildId: Long = 0L
+
+    // النظام الذكي المستوحى لاستخراج التوكن بالقوة وتخطي فحص الكومبايلر
+    private fun getDiscordToken(): String {
+        val auth = StoreStream.getAuthentication()
+        return try {
+            auth.javaClass.getMethod("getAuthToken").invoke(auth) as? String ?: ""
+        } catch (e: Exception) {
+            try {
+                auth.javaClass.getDeclaredField("authToken").apply { isAccessible = true }.get(auth) as? String ?: ""
+            } catch (e2: Exception) {
+                ""
+            }
+        }
+    }
 
     override fun onViewBound(view: View) {
         super.onViewBound(view)
@@ -150,8 +163,7 @@ class SmartProfileSettings : SettingsPage() {
     ) {
         Utils.threadPool.execute {
             try {
-                // تم التعديل هنا لاستخدام الدالة الرسمية
-                val token = StoreStream.getAuthentication().getAuthToken()
+                val token = getDiscordToken()
                 val url = if (isServer && currentGuildId != 0L) {
                     "https://discord.com/api/v9/users/@me/profile?with_mutual_guilds=false&guild_id=$currentGuildId"
                 } else {
@@ -206,8 +218,7 @@ class SmartProfileSettings : SettingsPage() {
     ) {
         Utils.threadPool.execute {
             try {
-                // تم التعديل هنا لاستخدام الدالة الرسمية
-                val token = StoreStream.getAuthentication().getAuthToken()
+                val token = getDiscordToken()
                 val json = JSONObject()
 
                 if (name.isNotEmpty()) {
@@ -264,8 +275,7 @@ class SmartProfileSettings : SettingsPage() {
     private fun fetchCollectibles(ctx: Context, decoSpinner: Spinner, effectSpinner: Spinner) {
         Utils.threadPool.execute {
             try {
-                // تم التعديل هنا لاستخدام الدالة الرسمية
-                val token = StoreStream.getAuthentication().getAuthToken()
+                val token = getDiscordToken()
                 val req = Http.Request("https://discord.com/api/v9/collectibles/categories", "GET")
                     .setHeader("Authorization", token)
                 val res = req.execute()
@@ -301,3 +311,4 @@ class SmartProfileSettings : SettingsPage() {
         }
     }
 }
+
