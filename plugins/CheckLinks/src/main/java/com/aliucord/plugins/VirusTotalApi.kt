@@ -2,7 +2,7 @@ package com.aliucord.plugins
 
 import android.util.Base64
 import com.aliucord.Http
-import com.aliucord.utils.GsonUtils
+import com.google.gson.Gson
 
 data class VtEntry(val engine: String, val category: String)
 
@@ -46,6 +46,7 @@ private data class VtSubmitResponse(val data: VtSubmitData?)
 
 object VirusTotalApi {
     private const val BASE = "https://www.virustotal.com/api/v3"
+    private val gson = Gson()
 
     fun check(url: String, apiKey: String): VtResult? {
         val urlId = Base64.encodeToString(
@@ -59,7 +60,7 @@ object VirusTotalApi {
             .execute()
 
         if (cachedRes.ok()) {
-            val parsed = GsonUtils.gson.fromJson(cachedRes.text(), VtCachedResponse::class.java)
+            val parsed = gson.fromJson(cachedRes.text(), VtCachedResponse::class.java)
             val attrs = parsed?.data?.attributes
             if (attrs?.last_analysis_stats != null) {
                 return buildResult(attrs.last_analysis_stats, attrs.last_analysis_results)
@@ -73,7 +74,7 @@ object VirusTotalApi {
 
         if (!submitRes.ok()) return null
 
-        val submitParsed = GsonUtils.gson.fromJson(submitRes.text(), VtSubmitResponse::class.java)
+        val submitParsed = gson.fromJson(submitRes.text(), VtSubmitResponse::class.java)
         val analysisId = submitParsed?.data?.id ?: return null
 
         // Poll analysis status until completion
@@ -86,7 +87,7 @@ object VirusTotalApi {
 
             if (!pollRes.ok()) return@repeat
 
-            val pollParsed = GsonUtils.gson.fromJson(pollRes.text(), VtAnalysisResponse::class.java)
+            val pollParsed = gson.fromJson(pollRes.text(), VtAnalysisResponse::class.java)
             val attrs = pollParsed?.data?.attributes ?: return@repeat
 
             if (attrs.status == "completed" && attrs.stats != null) {
@@ -117,3 +118,4 @@ object VirusTotalApi {
         )
     }
 }
+
