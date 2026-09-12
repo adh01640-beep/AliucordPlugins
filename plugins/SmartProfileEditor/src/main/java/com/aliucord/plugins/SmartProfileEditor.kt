@@ -28,13 +28,11 @@ class SmartProfileEditor : Plugin() {
         val logger = Logger("SmartProfileEditor")
     }
 
-    // لا زلنا نحتفظ بمسار الإعدادات كاحتياطي
     init {
         settingsTab = SettingsTab(SmartProfileSettings::class.java)
     }
 
     override fun start(context: Context) {
-        // تسجيل أمر السلاش لفتح الواجهة من أي مكان بسهولة
         commands.registerCommand(
             "editprofile",
             "Open the Smart Profile Editor (Global & Server Profiles)",
@@ -64,7 +62,6 @@ class SmartProfileSettings : SettingsPage() {
         decoMap["None"] = ""
         effectMap["None"] = ""
 
-        // جلب أيدي السيرفر الحالي (لو كنت داخل سيرفر)
         currentGuildId = StoreStream.getGuildSelected().selectedGuildId
 
         val scrollView = ScrollView(ctx)
@@ -73,7 +70,6 @@ class SmartProfileSettings : SettingsPage() {
             setPadding(32, 32, 32, 32)
         }
 
-        // --- نظام التفرقة بين الجلوبال والسيرفر ---
         val profileTypeLabel = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_TextView).apply { 
             text = "Editing Target:" 
             textSize = 16f
@@ -87,7 +83,6 @@ class SmartProfileSettings : SettingsPage() {
         }
         profileTypeSpinner.adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, profileTypes)
 
-        // --- الحقول ---
         val displayNameInput = TextInput(ctx, "Display Name / Server Nickname")
         val pronounsInput = TextInput(ctx, "Pronouns")
         val bioInput = TextInput(ctx, "Bio")
@@ -100,7 +95,6 @@ class SmartProfileSettings : SettingsPage() {
         val effectLabel = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_TextView).apply { text = "Profile Effect"; setPadding(0, 16, 0, 0) }
         val effectSpinner = Spinner(ctx)
 
-        // إضافة العناصر للواجهة
         layout.addView(profileTypeLabel)
         layout.addView(profileTypeSpinner)
         layout.addView(displayNameInput)
@@ -113,10 +107,8 @@ class SmartProfileSettings : SettingsPage() {
         layout.addView(effectLabel)
         layout.addView(effectSpinner)
 
-        // جلب المقتنيات
         fetchCollectibles(ctx, decoSpinner, effectSpinner)
 
-        // --- زر تحميل البيانات الحالية ---
         val loadBtn = Button(ctx).apply {
             text = "Load Current Data"
             setOnClickListener {
@@ -125,7 +117,6 @@ class SmartProfileSettings : SettingsPage() {
             }
         }
 
-        // --- زر الحفظ ---
         val saveBtn = Button(ctx).apply {
             text = "Save Profile"
             setOnClickListener {
@@ -159,8 +150,8 @@ class SmartProfileSettings : SettingsPage() {
     ) {
         Utils.threadPool.execute {
             try {
-                // إصلاح خطأ authToken باستخدام token
-                val token = StoreStream.getAuthentication().token
+                // تم التعديل هنا لاستخدام الدالة الرسمية
+                val token = StoreStream.getAuthentication().getAuthToken()
                 val url = if (isServer && currentGuildId != 0L) {
                     "https://discord.com/api/v9/users/@me/profile?with_mutual_guilds=false&guild_id=$currentGuildId"
                 } else {
@@ -174,7 +165,6 @@ class SmartProfileSettings : SettingsPage() {
                     val json = JSONObject(res.text())
                     val userObj = json.optJSONObject("user")
                     
-                    // تحديد من أين نقرأ البيانات (الجلوبال أو السيرفر)
                     val targetObj = if (isServer && json.has("guild_member_profile")) {
                         json.optJSONObject("guild_member_profile")
                     } else {
@@ -184,7 +174,6 @@ class SmartProfileSettings : SettingsPage() {
                     val memberObj = json.optJSONObject("guild_member")
 
                     Utils.mainThread.post {
-                        // استخراج الاسم (Nick للسيرفر، Global للأساسي)
                         val name = if (isServer) memberObj?.optString("nick", "") else userObj?.optString("global_name", "")
                         if (!name.isNullOrEmpty() && name != "null") nameInput.editText.setText(name)
 
@@ -217,11 +206,10 @@ class SmartProfileSettings : SettingsPage() {
     ) {
         Utils.threadPool.execute {
             try {
-                // إصلاح خطأ authToken باستخدام token
-                val token = StoreStream.getAuthentication().token
+                // تم التعديل هنا لاستخدام الدالة الرسمية
+                val token = StoreStream.getAuthentication().getAuthToken()
                 val json = JSONObject()
 
-                // التفرقة في أسماء الحقول بناءً على نوع البروفايل
                 if (name.isNotEmpty()) {
                     if (isServer) json.put("nick", name) else json.put("global_name", name)
                 }
@@ -246,7 +234,6 @@ class SmartProfileSettings : SettingsPage() {
                     }
                 }
 
-                // التفرقة في رابط الـ API بناءً على الاختيار
                 val url = if (isServer && currentGuildId != 0L) {
                     "https://discord.com/api/v9/guilds/$currentGuildId/members/@me"
                 } else {
@@ -277,8 +264,8 @@ class SmartProfileSettings : SettingsPage() {
     private fun fetchCollectibles(ctx: Context, decoSpinner: Spinner, effectSpinner: Spinner) {
         Utils.threadPool.execute {
             try {
-                // إصلاح خطأ authToken باستخدام token
-                val token = StoreStream.getAuthentication().token
+                // تم التعديل هنا لاستخدام الدالة الرسمية
+                val token = StoreStream.getAuthentication().getAuthToken()
                 val req = Http.Request("https://discord.com/api/v9/collectibles/categories", "GET")
                     .setHeader("Authorization", token)
                 val res = req.execute()
