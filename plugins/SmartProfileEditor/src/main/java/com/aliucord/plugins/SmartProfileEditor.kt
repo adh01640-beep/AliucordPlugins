@@ -4,22 +4,22 @@ import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import com.aliucord.Http
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.fragments.SettingsPage
-import com.aliucord.Http
 import com.aliucord.views.Button
 import com.aliucord.views.TextInput
 import com.discord.stores.StoreStream
+import com.discord.utilities.rest.RestAPI
 import com.facebook.drawee.view.SimpleDraweeView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -52,33 +52,39 @@ class SmartProfileEditor : Plugin() {
 
 @SuppressLint("SetTextI18n")
 class SmartProfileSettings : SettingsPage() {
+    // asset = هاش الصورة الحقيقي المطلوب لإرساله في avatar_decoration_data.asset
+    // id    = sku_id الحقيقي المطلوب في avatar_decoration_data.sku_id
+    data class CollectibleItem(val name: String, val id: String, val asset: String, val iconUrl: String, val isEffect: Boolean)
+    data class GuildItem(val name: String, val id: Long)
+
     private val decoList = mutableListOf<CollectibleItem>()
     private val effectList = mutableListOf<CollectibleItem>()
     private val guildList = mutableListOf<GuildItem>()
-    
+    private val tagGuildList = mutableListOf<GuildItem>() // بدون "Global" لأن التاج مرتبط بسيرفر دائماً
+
     private var selectedPrimaryColor: Int? = null
     private var selectedAccentColor: Int? = null
+    private var tagEnabled = false
 
-    data class CollectibleItem(val name: String, val id: String, val iconUrl: String, val isEffect: Boolean)
-    data class GuildItem(val name: String, val id: Long)
-
-    // استخراج التوكن التلقائي الجذري (يعمل دائماً)
+    /**
+     * ==========================================================================
+     * إصلاح جذري: الطريقة القديمة (البحث في حقول StoreAuthentication عن أي
+     * String يبدأ بـ "mfa."/"MTA" أو طوله>50) غير موثوقة إطلاقاً وغالباً
+     * ترجع "" فتفشل كل العمليات بصمت (return@execute).
+     *
+     * الطريقة الصحيحة المؤكدة (فحصتها من بلوقن "Token" الرسمي الشغّال):
+     *   RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
+     * وهي دالة singleton حقيقية داخل ديسكورد نفسه تُرجع توكن الحساب الحالي
+     * مباشرة دون أي تخمين reflection.
+     * ==========================================================================
+     */
     private fun getDiscordToken(): String {
-        try {
-            val auth = StoreStream.getAuthentication()
-            for (field in auth.javaClass.declaredFields) {
-                if (field.type == String::class.java) {
-                    field.isAccessible = true
-                    val value = field.get(auth) as? String
-                    if (value != null && (value.startsWith("mfa.") || value.startsWith("MTA") || value.length > 50)) {
-                        return value
-                    }
-                }
-            }
+        return try {
+            RestAPI.AppHeadersProvider.INSTANCE.authToken ?: ""
         } catch (e: Exception) {
             SmartProfileEditor.logger.error("Token Extraction Failed", e)
+            ""
         }
-        return ""
     }
 
     override fun onViewBound(view: View) {
@@ -92,7 +98,7 @@ class SmartProfileSettings : SettingsPage() {
             setPadding(32, 32, 32, 32)
         }
 
-        // 1. قائمة السيرفرات التلقائية
+        // 1. قائمة السيرفرات التلقائية (للبروفايل: Global أو سيرفر معيّن)
         val guildLabel = createLabel(ctx, "Target Profile (Global or Server)")
         val guildSpinner = Spinner(ctx)
         loadGuilds(ctx, guildSpinner)
@@ -101,25 +107,29 @@ class SmartProfileSettings : SettingsPage() {
         val pronounsInput = TextInput(ctx, "Pronouns")
         val bioInput = TextInput(ctx, "Bio")
 
-        // 2. اختيار الألوان بصرياً (بدون أكواد)
+        // 2. اختيار الألوان بصرياً
         val colorsLayout = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 16, 0, 16) }
-        
+
         val primaryColorBtn = Button(ctx).apply {
             text = "Primary Color"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            setOnClickListener { showColorPicker(ctx, "Primary Color") { color -> 
-                selectedPrimaryColor = color
-                this.setBackgroundColor(color)
-            }}
+            setOnClickListener {
+                showColorPicker(ctx, "Primary Color") { color ->
+                    selectedPrimaryColor = color
+                    this.setBackgroundColor(color)
+                }
+            }
         }
-        
+
         val accentColorBtn = Button(ctx).apply {
             text = "Accent Color"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            setOnClickListener { showColorPicker(ctx, "Accent Color") { color -> 
-                selectedAccentColor = color
-                this.setBackgroundColor(color)
-            }}
+            setOnClickListener {
+                showColorPicker(ctx, "Accent Color") { color ->
+                    selectedAccentColor = color
+                    this.setBackgroundColor(color)
+                }
+            }
         }
 
         colorsLayout.addView(primaryColorBtn)
@@ -128,9 +138,20 @@ class SmartProfileSettings : SettingsPage() {
         // 3. القوائم المنسدلة بالصور للزينة والتأثيرات
         val decoLabel = createLabel(ctx, "Avatar Decoration")
         val decoSpinner = Spinner(ctx)
-        
+
         val effectLabel = createLabel(ctx, "Profile Effect")
         val effectSpinner = Spinner(ctx)
+
+        // 4. تاج السيرفر (Server Tag / Primary Guild) — جديد
+        val tagLabel = createLabel(ctx, "Server Tag (Clan Tag)")
+        val tagGuildSpinner = Spinner(ctx)
+        loadTagGuilds(ctx, tagGuildSpinner)
+
+        val tagSwitch = Switch(ctx).apply {
+            text = "Show this server's tag on my profile"
+            setPadding(0, 8, 0, 16)
+            setOnCheckedChangeListener { _, isChecked -> tagEnabled = isChecked }
+        }
 
         layout.addView(guildLabel)
         layout.addView(guildSpinner)
@@ -142,6 +163,9 @@ class SmartProfileSettings : SettingsPage() {
         layout.addView(decoSpinner)
         layout.addView(effectLabel)
         layout.addView(effectSpinner)
+        layout.addView(tagLabel)
+        layout.addView(tagGuildSpinner)
+        layout.addView(tagSwitch)
 
         fetchCollectibles(ctx, decoSpinner, effectSpinner)
 
@@ -150,13 +174,16 @@ class SmartProfileSettings : SettingsPage() {
             setPadding(0, 32, 0, 0)
             setOnClickListener {
                 val selectedGuild = guildList.getOrNull(guildSpinner.selectedItemPosition)
+                val selectedTagGuild = tagGuildList.getOrNull(tagGuildSpinner.selectedItemPosition)
                 saveProfileData(
                     selectedGuild?.id ?: 0L,
                     displayNameInput.editText.text.toString(),
                     pronounsInput.editText.text.toString(),
                     bioInput.editText.text.toString(),
-                    (decoSpinner.selectedItem as? CollectibleItem)?.id ?: "",
-                    (effectSpinner.selectedItem as? CollectibleItem)?.id ?: ""
+                    decoSpinner.selectedItem as? CollectibleItem,
+                    effectSpinner.selectedItem as? CollectibleItem,
+                    selectedTagGuild,
+                    tagEnabled
                 )
             }
         }
@@ -178,13 +205,20 @@ class SmartProfileSettings : SettingsPage() {
     private fun loadGuilds(ctx: Context, spinner: Spinner) {
         guildList.clear()
         guildList.add(GuildItem("Global Profile (Default)", 0L))
-        
+
         StoreStream.getGuilds().guilds.values.forEach { guild ->
             guildList.add(GuildItem(guild.name, guild.id))
         }
 
-        val adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, guildList.map { it.name })
-        spinner.adapter = adapter
+        spinner.adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, guildList.map { it.name })
+    }
+
+    private fun loadTagGuilds(ctx: Context, spinner: Spinner) {
+        tagGuildList.clear()
+        StoreStream.getGuilds().guilds.values.forEach { guild ->
+            tagGuildList.add(GuildItem(guild.name, guild.id))
+        }
+        spinner.adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, tagGuildList.map { it.name })
     }
 
     private fun showColorPicker(ctx: Context, title: String, onColorSelected: (Int) -> Unit) {
@@ -203,13 +237,17 @@ class SmartProfileSettings : SettingsPage() {
         val bBar = SeekBar(ctx).apply { max = 255 }
 
         val updateColor = {
-            val color = Color.rgb(rBar.progress, gBar.progress, bBar.progress)
-            colorPreview.setBackgroundColor(color)
+            colorPreview.setBackgroundColor(Color.rgb(rBar.progress, gBar.progress, bBar.progress))
         }
 
-        rBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener { override fun onProgressChanged(s: SeekBar?, p: Int, b: Boolean) = updateColor(); override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {} })
-        gBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener { override fun onProgressChanged(s: SeekBar?, p: Int, b: Boolean) = updateColor(); override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {} })
-        bBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener { override fun onProgressChanged(s: SeekBar?, p: Int, b: Boolean) = updateColor(); override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {} })
+        val listener = object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, b: Boolean) = updateColor()
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        }
+        rBar.setOnSeekBarChangeListener(listener)
+        gBar.setOnSeekBarChangeListener(listener)
+        bBar.setOnSeekBarChangeListener(listener)
 
         dialogView.addView(colorPreview)
         dialogView.addView(TextView(ctx).apply { text = "Red" })
@@ -232,7 +270,10 @@ class SmartProfileSettings : SettingsPage() {
     private fun fetchCollectibles(ctx: Context, decoSpinner: Spinner, effectSpinner: Spinner) {
         Utils.threadPool.execute {
             val token = getDiscordToken()
-            if (token.isEmpty()) return@execute
+            if (token.isEmpty()) {
+                Utils.mainThread.post { Utils.showToast("Failed to get account token") }
+                return@execute
+            }
 
             try {
                 val res = Http.Request("https://discord.com/api/v9/collectibles/categories", "GET")
@@ -240,8 +281,8 @@ class SmartProfileSettings : SettingsPage() {
                     .execute()
 
                 if (res.statusCode in 200..299) {
-                    decoList.add(CollectibleItem("None", "", "", false))
-                    effectList.add(CollectibleItem("None", "", "", true))
+                    decoList.add(CollectibleItem("None", "", "", "", false))
+                    effectList.add(CollectibleItem("None", "", "", "", true))
 
                     val categories = JSONArray(res.text())
                     for (i in 0 until categories.length()) {
@@ -250,20 +291,20 @@ class SmartProfileSettings : SettingsPage() {
                             val prod = products.getJSONObject(j)
                             val items = prod.optJSONArray("items") ?: continue
                             val name = prod.optString("name", "Unknown")
-                            
+
                             for (k in 0 until items.length()) {
                                 val item = items.getJSONObject(k)
                                 val type = item.optInt("type")
                                 val id = item.optString("id")
                                 val skuId = item.optString("sku_id", id)
                                 val asset = item.optString("asset", "")
-                                
+
                                 if (type == 0) { // Decoration
-                                    val url = "https://cdn.discordapp.com/avatar-decoration-presets/${asset}.png"
-                                    decoList.add(CollectibleItem(name, skuId, url, false))
+                                    val url = "https://cdn.discordapp.com/avatar-decoration-presets/$asset.png"
+                                    decoList.add(CollectibleItem(name, skuId, asset, url, false))
                                 } else if (type == 1) { // Effect
-                                    val url = "https://cdn.discordapp.com/profile-effects/${id}/preview.png"
-                                    effectList.add(CollectibleItem(name, id, url, true))
+                                    val url = "https://cdn.discordapp.com/profile-effects/$id/preview.png"
+                                    effectList.add(CollectibleItem(name, id, asset, url, true))
                                 }
                             }
                         }
@@ -272,70 +313,128 @@ class SmartProfileSettings : SettingsPage() {
                         decoSpinner.adapter = CollectibleAdapter(ctx, decoList)
                         effectSpinner.adapter = CollectibleAdapter(ctx, effectList)
                     }
+                } else {
+                    Utils.mainThread.post { Utils.showToast("Collectibles fetch failed: ${res.statusCode}") }
                 }
             } catch (e: Exception) {
                 SmartProfileEditor.logger.error("Fetch collectibles error", e)
+                Utils.mainThread.post { Utils.showToast("Failed to load collectibles") }
             }
         }
     }
 
-    private fun saveProfileData(guildId: Long, name: String, pronouns: String, bio: String, decoId: String, effectId: String) {
+    private fun saveProfileData(
+        guildId: Long,
+        name: String,
+        pronouns: String,
+        bio: String,
+        deco: CollectibleItem?,
+        effect: CollectibleItem?,
+        tagGuild: GuildItem?,
+        tagEnabledNow: Boolean
+    ) {
         Utils.threadPool.execute {
             val token = getDiscordToken()
-            if (token.isEmpty()) return@execute
+            if (token.isEmpty()) {
+                Utils.mainThread.post { Utils.showToast("Failed to get account token") }
+                return@execute
+            }
 
             val isServer = guildId != 0L
+            var anySuccess = false
+            var lastError: String? = null
 
             try {
-                // 1. تحديث الاسم والزينة (مسار Users)
-                val userJson = JSONObject()
-                if (!isServer && name.isNotEmpty()) userJson.put("global_name", name)
-                if (!isServer) userJson.put("avatar_decoration_id", decoId.ifEmpty { JSONObject.NULL })
+                // 1. تحديث الاسم العام + الديكوريشن (فقط للبروفايل العام Global)
+                if (!isServer) {
+                    val userJson = JSONObject()
+                    if (name.isNotEmpty()) userJson.put("global_name", name)
 
-                if (userJson.length() > 0) {
-                    Http.Request("https://discord.com/api/v9/users/@me", "PATCH")
-                        .setHeader("Authorization", token)
-                        .setHeader("Content-Type", "application/json")
-                        .executeWithBody(userJson.toString())
+                    // avatar_decoration_data يجب أن يكون object فيه asset و sku_id،
+                    // أو null صريحة لإزالة الديكوريشن — وليس string مفرد.
+                    if (deco != null) {
+                        if (deco.id.isEmpty()) {
+                            userJson.put("avatar_decoration_data", JSONObject.NULL)
+                        } else {
+                            userJson.put(
+                                "avatar_decoration_data",
+                                JSONObject().put("asset", deco.asset).put("sku_id", deco.id)
+                            )
+                        }
+                    }
+
+                    // تاج السيرفر (Server Tag / primary_guild) — يعمل من مسار /users/@me
+                    if (tagGuild != null) {
+                        if (tagEnabledNow) {
+                            userJson.put(
+                                "primary_guild",
+                                JSONObject()
+                                    .put("identity_guild_id", tagGuild.id.toString())
+                                    .put("identity_enabled", true)
+                            )
+                        } else {
+                            userJson.put(
+                                "primary_guild",
+                                JSONObject().put("identity_enabled", false)
+                            )
+                        }
+                    }
+
+                    if (userJson.length() > 0) {
+                        val r = Http.Request("https://discord.com/api/v9/users/@me", "PATCH")
+                            .setHeader("Authorization", token)
+                            .setHeader("Content-Type", "application/json")
+                            .executeWithBody(userJson.toString())
+                        if (r.statusCode in 200..299) anySuccess = true else lastError = "users/@me: ${r.statusCode} ${r.text()}"
+                    }
                 }
 
-                // 2. تحديث بروفايل السيرفر (Nick)
+                // 2. تحديث نك السيرفر (خاص بسيرفر معيّن فقط)
                 if (isServer && name.isNotEmpty()) {
                     val nickJson = JSONObject().put("nick", name)
-                    Http.Request("https://discord.com/api/v9/guilds/$guildId/members/@me", "PATCH")
+                    val r = Http.Request("https://discord.com/api/v9/guilds/$guildId/members/@me", "PATCH")
                         .setHeader("Authorization", token)
                         .setHeader("Content-Type", "application/json")
                         .executeWithBody(nickJson.toString())
+                    if (r.statusCode in 200..299) anySuccess = true else lastError = "guild nick: ${r.statusCode} ${r.text()}"
                 }
 
-                // 3. تحديث البايو، الألوان والتأثيرات (مسار Profile)
+                // 3. البايو، الألوان والتأثيرات (Profile endpoint، عام أو خاص بسيرفر)
                 val profileJson = JSONObject()
                 if (pronouns.isNotEmpty()) profileJson.put("pronouns", pronouns)
                 if (bio.isNotEmpty()) profileJson.put("bio", bio)
-                profileJson.put("profile_effect_id", effectId.ifEmpty { JSONObject.NULL })
-
+                if (effect != null) {
+                    profileJson.put("profile_effect_id", if (effect.id.isEmpty()) JSONObject.NULL else effect.id)
+                }
                 if (selectedPrimaryColor != null && selectedAccentColor != null) {
                     profileJson.put("theme_colors", JSONArray().put(selectedPrimaryColor).put(selectedAccentColor))
                 }
 
-                val profileUrl = if (isServer) "https://discord.com/api/v9/users/@me/guilds/$guildId/profile" else "https://discord.com/api/v9/users/@me/profile"
-                
-                val res = Http.Request(profileUrl, "PATCH")
-                    .setHeader("Authorization", token)
-                    .setHeader("Content-Type", "application/json")
-                    .executeWithBody(profileJson.toString())
+                if (profileJson.length() > 0) {
+                    val profileUrl = if (isServer)
+                        "https://discord.com/api/v9/users/@me/guilds/$guildId/profile"
+                    else
+                        "https://discord.com/api/v9/users/@me/profile"
+
+                    val res = Http.Request(profileUrl, "PATCH")
+                        .setHeader("Authorization", token)
+                        .setHeader("Content-Type", "application/json")
+                        .executeWithBody(profileJson.toString())
+
+                    if (res.statusCode in 200..299) anySuccess = true else lastError = "profile: ${res.statusCode} ${res.text()}"
+                }
 
                 Utils.mainThread.post {
-                    if (res.statusCode in 200..299) Utils.showToast("Saved Successfully!")
-                    else Utils.showToast("Error ${res.statusCode}")
+                    if (anySuccess) Utils.showToast("Saved Successfully!")
+                    else Utils.showToast("Error: ${lastError ?: "nothing to save"}")
                 }
             } catch (e: Exception) {
-                Utils.mainThread.post { Utils.showToast("Failed to save") }
+                SmartProfileEditor.logger.error("Save profile error", e)
+                Utils.mainThread.post { Utils.showToast("Failed to save: ${e.message}") }
             }
         }
     }
 
-    // محول مخصص يعرض الصورة والاسم في القائمة المنسدلة
     private inner class CollectibleAdapter(context: Context, items: List<CollectibleItem>) : ArrayAdapter<CollectibleItem>(context, 0, items) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View = createView(position)
         override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View = createView(position)
