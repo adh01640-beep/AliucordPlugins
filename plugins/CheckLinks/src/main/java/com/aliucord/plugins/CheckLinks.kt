@@ -86,7 +86,6 @@ class CheckLinks : Plugin() {
             return
         }
 
-        // تم التعديل هنا: استخدام فحص Java الآمن بدلاً من isBlank()
         if (apiKey == "") {
             promptForApiKey(context) { handleLinkClick(context, url) }
             return
@@ -104,8 +103,13 @@ class CheckLinks : Plugin() {
 
             mainHandler.post {
                 if (result == null) {
-                    Toast.makeText(context, "Couldn't check link, opening anyway", Toast.LENGTH_SHORT).show()
-                    openUrl(context, url)
+                    // إظهار نافذة تأكيد عند فشل الفحص بدلاً من فتح الرابط مباشرة
+                    AlertDialog.Builder(context)
+                        .setTitle("Scan Failed")
+                        .setMessage("Could not retrieve scan results from VirusTotal for this link. Do you still want to open it?\n\n$url")
+                        .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
+                        .setNegativeButton("Cancel", null)
+                        .show()
                 } else {
                     cache[url] = result
                     showResultDialog(context, url, result)
@@ -140,7 +144,6 @@ class CheckLinks : Plugin() {
     private fun showDetailsDialog(context: Context, result: VtResult) {
         val text = result.entries.joinToString("\n") { "${it.engine}: ${it.category}" }
 
-        // تم التعديل هنا: استخدام فحص الطول بدلاً من ifBlank()
         val displayMessage = if (text.length == 0) "No per-engine details available." else text
 
         AlertDialog.Builder(context)
@@ -174,7 +177,6 @@ class CheckLinks : Plugin() {
             .setView(container)
             .setPositiveButton("Save") { _, _ ->
                 val key = input.text.toString().trim()
-                // تم التعديل هنا: استخدام length بدلاً من isNotEmpty()
                 if (key.length > 0) {
                     prefs.edit().putString(PREF_API_KEY, key).apply()
                     onSaved()
@@ -184,3 +186,4 @@ class CheckLinks : Plugin() {
             .show()
     }
 }
+
