@@ -43,26 +43,30 @@ class CheckLinks : Plugin() {
                 it.name.startsWith("handle") || it.name.startsWith("openUrl")
             }
 
-            if (methods.isEmpty()) {
-                logger.error("No URL handling methods found in UriHandler!", null)
-                return
-            }
-
             for (method in methods) {
                 patcher.patch(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val url = param.args.firstOrNull { 
+                        // سحب الرابط الحي من البارامترات سواء كان String أو Uri
+                        val urlStr = param.args.firstOrNull { 
                             it is String && (it.startsWith("http://") || it.startsWith("https://")) 
-                        } as? String ?: return
+                        } as? String
+                        
+                        val uriObj = param.args.firstOrNull { it is Uri } as? Uri
+                        val finalUrl = urlStr ?: uriObj?.toString() ?: return
 
-                        if (url.contains("discord.com/channels") || url.contains("discordapp.com/channels")) {
+                        // تجاهل روابط ديسكورد الداخلية
+                        if (finalUrl.contains("discord.com/channels") || finalUrl.contains("discordapp.com/channels")) {
                             return
                         }
 
+                        // سحب الشاشة الحالية بدقة لتفادي الكراش
+                        val currentContext = param.args.firstOrNull { it is Context } as? Context ?: Utils.appActivity ?: return
+
+                        // إيقاف فتح الرابط الافتراضي
                         param.result = null 
 
                         mainHandler.post {
-                            handleLinkClick(url)
+                            handleLinkClick(currentContext, finalUrl)
                         }
                     }
                 })
@@ -77,22 +81,21 @@ class CheckLinks : Plugin() {
         cache.clear()
     }
 
-    private fun handleLinkClick(url: String) {
+    private fun handleLinkClick(context: Context, url: String) {
         val cached = cache[url]
         if (cached != null) {
-            showResultDialog(url, cached)
+            showResultDialog(context, url, cached)
             return
         }
 
         if (apiKey == "") {
-            promptForApiKey { handleLinkClick(url) }
+            promptForApiKey(context) { handleLinkClick(context, url) }
             return
         }
 
-        val currentActivity = Utils.appActivity
-        if (currentActivity != null && !currentActivity.isFinishing) {
-            Toast.makeText(currentActivity, "Checking link with VirusTotal...", Toast.LENGTH_SHORT).show()
-        }
+        try {
+            Toast.makeText(context, "Checking link with VirusTotal...", Toast.LENGTH_SHORT).show()
+        } catch (e: Throwable) {}
 
         Utils.threadPool.execute {
             val result = try {
@@ -104,30 +107,25 @@ class CheckLinks : Plugin() {
 
             mainHandler.post {
                 if (result == null) {
-                    val activity = Utils.appActivity
-                    if (activity != null && !activity.isFinishing) {
-                        AlertDialog.Builder(activity)
+                    try {
+                        AlertDialog.Builder(context)
                             .setTitle("Scan Failed")
                             .setMessage("Could not retrieve scan results from VirusTotal for this link. Do you still want to open it?\n\n$url")
-                            .setPositiveButton("Open") { _, _ -> openUrl(url) }
+                            .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
                             .setNegativeButton("Cancel", null)
                             .show()
-                    } else {
-                        openUrl(url)
+                    } catch (e: Throwable) {
+                        openUrl(context, url) // خطة بديلة لو الشاشة ماتت
                     }
                 } else {
                     cache[url] = result
-                    showResultDialog(url, result)
+                    showResultDialog(context, url, result)
                 }
             }
         }
     }
 
-    private fun showResultDialog(url: String, result: VtResult) {
-        val activity = Utils.appActivity
-        // الحماية من الكراش: التأكد أن النافذة موجودة ولم يتم تدميرها
-        if (activity == null || activity.isFinishing) return
-
+    private fun showResultDialog(context: Context, url: String, result: VtResult) {
         val message = buildString {
             if (result.totalEngines == 0) {
                 append("No engines have flagged this link yet — it may be too new or unscanned.\n\n")
@@ -141,70 +139,75 @@ class CheckLinks : Plugin() {
             append(url)
         }
 
-        AlertDialog.Builder(activity)
-            .setTitle("Link Safety Check")
-            .setMessage(message)
-            .setPositiveButton("Open") { _, _ -> openUrl(url) }
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("Details") { _, _ -> showDetailsDialog(result) }
-            .show()
+        try {
+            AlertDialog.Builder(context)
+                .setTitle("Link Safety Check")
+                .setMessage(message)
+                .setPositiveButton("Open") { _, _ -> openUrl(context, url) }
+                .setNegativeButton("Cancel", null)
+                .setNeutralButton("Details") { _, _ -> showDetailsDialog(context, result) }
+                .show()
+        } catch (e: Throwable) {
+            openUrl(context, url) // خطة بديلة لعدم تجميد الرابط
+        }
     }
 
-    private fun showDetailsDialog(result: VtResult) {
-        val activity = Utils.appActivity
-        if (activity == null || activity.isFinishing) return
-
+    private fun showDetailsDialog(context: Context, result: VtResult) {
         val text = result.entries.joinToString("\n") { "${it.engine}: ${it.category}" }
         val displayMessage = if (text.length == 0) "No per-engine details available." else text
 
-        AlertDialog.Builder(activity)
-            .setTitle("Engine Results")
-            .setMessage(displayMessage)
-            .setPositiveButton("Close", null)
-            .show()
+        try {
+            AlertDialog.Builder(context)
+                .setTitle("Engine Results")
+                .setMessage(displayMessage)
+                .setPositiveButton("Close", null)
+                .show()
+        } catch (e: Throwable) {}
     }
 
-    private fun openUrl(url: String) {
+    private fun openUrl(context: Context, url: String) {
         try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            val activity = Utils.appActivity
-            
-            if (activity != null) {
-                activity.startActivity(intent)
-            } else {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                Utils.appContext.startActivity(intent)
-            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
         } catch (e: Throwable) {
-            logger.error("Could not open link", e)
+            try {
+                // محاولة أخيرة بـ AppContext الأساسي
+                val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                Utils.appContext.startActivity(fallbackIntent)
+            } catch (e2: Throwable) {
+                logger.error("Completely failed to open link", e2)
+            }
         }
     }
 
-    private fun promptForApiKey(onSaved: () -> Unit) {
-        val activity = Utils.appActivity
-        if (activity == null || activity.isFinishing) return
-
-        val input = EditText(activity).apply {
-            hint = "VirusTotal API key"
-        }
-        val padding = (16 * activity.resources.displayMetrics.density).toInt()
-        val container = LinearLayout(activity).apply {
-            setPadding(padding, padding, padding, padding)
-            addView(input)
-        }
-
-        AlertDialog.Builder(activity)
-            .setTitle("VirusTotal API Key Required")
-            .setMessage("Get a free key at virustotal.com, then paste it below. You only need to do this once.")
-            .setView(container)
-            .setPositiveButton("Save") { _, _ ->
-                val key = input.text.toString().trim()
-                if (key.length > 0) {
-                    prefs.edit().putString(PREF_API_KEY, key).apply()
-                    onSaved()
-                }
+    private fun promptForApiKey(context: Context, onSaved: () -> Unit) {
+        try {
+            val input = EditText(context).apply {
+                hint = "VirusTotal API key"
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            val padding = (16 * context.resources.displayMetrics.density).toInt()
+            val container = LinearLayout(context).apply {
+                setPadding(padding, padding, padding, padding)
+                addView(input)
+            }
+
+            AlertDialog.Builder(context)
+                .setTitle("VirusTotal API Key Required")
+                .setMessage("Get a free key at virustotal.com, then paste it below. You only need to do this once.")
+                .setView(container)
+                .setPositiveButton("Save") { _, _ ->
+                    val key = input.text.toString().trim()
+                    if (key.length > 0) {
+                        prefs.edit().putString(PREF_API_KEY, key).apply()
+                        onSaved()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        } catch (e: Throwable) {
+            logger.error("Failed to show API key dialog", e)
+        }
     }
 }
