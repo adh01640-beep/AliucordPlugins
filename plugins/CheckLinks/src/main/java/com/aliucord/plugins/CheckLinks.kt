@@ -10,10 +10,11 @@ import android.os.Looper
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Toast
-import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
+import com.aliucord.api.CommandsAPI.CommandResult
 import com.aliucord.entities.Plugin
+import com.discord.api.commands.ApplicationCommandType
 import de.robv.android.xposed.XC_MethodHook
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,7 +22,6 @@ import java.util.concurrent.ConcurrentHashMap
 class CheckLinks : Plugin() {
 
     companion object {
-        private val logger = Logger("CheckLinks")
         private const val PREFS_NAME = "CheckLinksPrefs"
         private const val PREF_API_KEY = "vt_api_key"
     }
@@ -39,6 +39,36 @@ class CheckLinks : Plugin() {
     override fun start(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+        // 1. تسجيل أمر /checklink
+        val arguments = listOf(
+            Utils.createCommandOption(
+                ApplicationCommandType.STRING,
+                "link",
+                "The URL to check with VirusTotal",
+                null,
+                true
+            )
+        )
+
+        commands.registerCommand(
+            "checklink",
+            "Check a link with VirusTotal before sending it",
+            arguments
+        ) { ctx ->
+            val url = ctx.getRequiredString("link")
+            val activityContext = Utils.appActivity
+            
+            if (activityContext != null) {
+                mainHandler.post {
+                    handleLinkClick(activityContext, url)
+                }
+                CommandResult("Scan started! Check the popup dialog.", null, false)
+            } else {
+                CommandResult("Error: App must be open to show the scan dialog.", null, false)
+            }
+        }
+
+        // 2. الهوك الخاص باعتراض الضغطات
         try {
             val uriHandlerClass = Class.forName("com.discord.utilities.uri.UriHandler")
             
@@ -56,7 +86,6 @@ class CheckLinks : Plugin() {
                         val uriObj = param.args.firstOrNull { it is Uri } as? Uri
                         val finalUrl = urlStr ?: uriObj?.toString() ?: return
 
-                        // السماح للروابط بالمرور فوراً إذا تم استثناؤها (عند الضغط على Open in App أو Browser)
                         if (finalUrl == bypassedUrl) {
                             bypassedUrl = null
                             return
@@ -83,6 +112,7 @@ class CheckLinks : Plugin() {
 
     override fun stop(context: Context) {
         patcher.unpatchAll()
+        commands.unregisterAll()
         cache.clear()
     }
 
@@ -146,7 +176,6 @@ class CheckLinks : Plugin() {
         }
 
         try {
-            // تصميم واجهة مخصصة لدمج زر التفاصيل داخل النافذة نفسها
             val layout = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 val padding = (16 * context.resources.displayMetrics.density).toInt()
@@ -162,7 +191,7 @@ class CheckLinks : Plugin() {
             val detailsBtn = android.widget.TextView(context).apply {
                 text = "VIEW ENGINE DETAILS"
                 textSize = 14f
-                setTextColor(android.graphics.Color.parseColor("#7289da")) // لون ديسكورد الأزرق
+                setTextColor(android.graphics.Color.parseColor("#7289da")) 
                 setPadding(0, (24 * context.resources.displayMetrics.density).toInt(), 0, 0)
             }
 
@@ -206,15 +235,15 @@ class CheckLinks : Plugin() {
     }
 
     private fun openInApp(context: Context, url: String) {
-        bypassedUrl = url // إخبار الهوك بتمرير هذا الرابط وعدم فحصه مرة أخرى
+        bypassedUrl = url 
         try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            intent.setPackage(context.packageName) // إجبار نظام أندرويد على توجيه الرابط لداخل ديسكورد
+            intent.setPackage(context.packageName) 
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
         } catch (e: Throwable) {
             logger.error("Failed to open in app via intent", e)
-            openUrl(context, url) // خطة بديلة
+            openUrl(context, url) 
         }
     }
 
@@ -264,4 +293,3 @@ class CheckLinks : Plugin() {
         }
     }
 }
-
