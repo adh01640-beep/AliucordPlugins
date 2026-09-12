@@ -1,5 +1,5 @@
 version = "1.0.0"
-description = "edit your profile with new options: profile effect, server tag, and more!"
+description = "edit your profile with new options: profile effect, server tag, and more! edit using command: /editprofile"
 
 aliucord {
     changelog.set(
