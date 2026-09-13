@@ -13,6 +13,7 @@ import com.aliucord.api.CommandsAPI.CommandResult
 import com.aliucord.entities.Plugin
 import com.aliucord.utils.DimenUtils
 import com.discord.api.commands.ApplicationCommandType
+import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
 import org.json.JSONObject
 import java.lang.Exception
@@ -24,8 +25,18 @@ class GhostMessage : Plugin() {
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    
+    // متغيرات التحكم في الحذف التلقائي
+    private var autoDeleteEnabled = false
+    private var activationSnowflake = 0L
 
     override fun start(context: Context) {
+        registerAutoMessageCommand()
+        registerAutoDeleteCommands()
+        hookIncomingMessages()
+    }
+
+    private fun registerAutoMessageCommand() {
         val arguments = listOf(
             Utils.createCommandOption(
                 ApplicationCommandType.STRING,
@@ -46,7 +57,7 @@ class GhostMessage : Plugin() {
             val activityContext = Utils.appActivity
 
             if (activityContext == null) {
-                return@registerCommand CommandResult("Error: App activity not found. Cannot show dialog.", null, false)
+                return@registerCommand CommandResult("Error: App activity not found.", null, false)
             }
 
             if (type == "delete") {
@@ -56,7 +67,81 @@ class GhostMessage : Plugin() {
                 mainHandler.post { showEditDialog(activityContext, channelId) }
                 CommandResult("Opening Edit Dialog...", null, false)
             } else {
-                CommandResult("Invalid type. Please run the command again and type 'delete' or 'edit'.", null, false)
+                CommandResult("Invalid type. Please type 'delete' or 'edit'.", null, false)
+            }
+        }
+    }
+
+    private fun registerAutoDeleteCommands() {
+        commands.registerCommand(
+            "autodeleteon",
+            "Automatically delete ALL messages and images you send from now on."
+        ) {
+            autoDeleteEnabled = true
+            // إنشاء Snowflake بناءً على الوقت الحالي لمنع حذف الرسائل القديمة عند التمرير
+            activationSnowflake = (System.currentTimeMillis() - 1420070400000L) shl 22
+            CommandResult("✅ Auto-delete is now ON. Every new message or attachment you send will be deleted immediately.", null, false)
+        }
+
+        commands.registerCommand(
+            "autodeleteoff",
+            "Turn off automatic deletion."
+        ) {
+            autoDeleteEnabled = false
+            CommandResult("❌ Auto-delete is now OFF.", null, false)
+        }
+    }
+
+    private fun hookIncomingMessages() {
+        val storeMessagesClass = StoreStream.getMessages().javaClass
+        val methods = storeMessagesClass.declaredMethods.filter { it.name == "handleMessageCreate" }
+        
+        for (method in methods) {
+            // نستخدم method.parameterTypes لتجنب أي مشاكل في الـ Signatures بين إصدارات ديسكورد
+            patcher.after(storeMessagesClass, method.name, method.parameterTypes) { param ->
+                if (!autoDeleteEnabled) return@after
+
+                try {
+                    val message = param.args.firstOrNull() ?: return@after
+                    
+                    // استخدام الـ Reflection لضمان الوصول للخصائص بغض النظر عن نوع كلاس الرسالة
+                    val getAuthorMethod = message.javaClass.getMethod("getAuthor")
+                    val author = getAuthorMethod.invoke(message) ?: return@after
+                    
+                    val getAuthorIdMethod = author.javaClass.getMethod("getId")
+                    val authorId = getAuthorIdMethod.invoke(author) as? Long ?: return@after
+                    
+                    val myId = StoreStream.getUsers().me.id
+                    
+                    // إذا كانت الرسالة مرسلة من حسابك أنت
+                    if (authorId == myId) {
+                        val getIdMethod = message.javaClass.getMethod("getId")
+                        val msgId = getIdMethod.invoke(message) as? Long ?: return@after
+                        
+                        // نتحقق أن الرسالة جديدة (تم إرسالها بعد تفعيل الأمر) وليس رسالة قديمة يتم تحميلها
+                        if (msgId > activationSnowflake) {
+                            val getChannelIdMethod = message.javaClass.getMethod("getChannelId")
+                            val channelId = getChannelIdMethod.invoke(message) as? Long ?: return@after
+                            
+                            deleteMessageById(channelId, msgId.toString())
+                        }
+                    }
+                } catch (e: Exception) {
+                    // تجاهل الأخطاء الصامتة الناتجة عن أنواع مختلفة من الحزم
+                }
+            }
+        }
+    }
+
+    private fun deleteMessageById(channelId: Long, msgId: String) {
+        Utils.threadPool.execute {
+            try {
+                val url = "https://discord.com/api/v9/channels/$channelId/messages/$msgId"
+                Http.Request(url, "DELETE")
+                    .setHeader("Authorization", authToken)
+                    .execute()
+            } catch (e: Exception) {
+                logger.error("AutoDelete Failed", e)
             }
         }
     }
@@ -109,8 +194,6 @@ class GhostMessage : Plugin() {
         Utils.threadPool.execute {
             try {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
-                
-                // تمرير البيانات كـ Map لمنع التشفير المزدوج
                 val body = mapOf("content" to text)
 
                 val response = Http.Request(url, "POST")
@@ -119,12 +202,9 @@ class GhostMessage : Plugin() {
 
                 if (response.statusCode in 200..299) {
                     val msgId = JSONObject(response.text()).getString("id")
-                    
                     Http.Request("$url/$msgId", "DELETE")
                         .setHeader("Authorization", authToken)
                         .execute()
-                } else {
-                    logger.error("Failed Ghost Delete: Code ${response.statusCode} - ${response.text()}", null)
                 }
             } catch (e: Exception) {
                 logger.error("Error in Ghost Delete", e)
@@ -136,7 +216,6 @@ class GhostMessage : Plugin() {
         Utils.threadPool.execute {
             try {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
-                
                 val bodyBefore = mapOf("content" to before)
 
                 val response = Http.Request(url, "POST")
@@ -147,13 +226,10 @@ class GhostMessage : Plugin() {
                     val msgId = JSONObject(response.text()).getString("id")
                     val bodyAfter = mapOf("content" to after)
 
-                    // استخدام POST مع هيدر التخطي بدلاً من PATCH الممنوع في أندرويد
                     Http.Request("$url/$msgId", "POST")
                         .setHeader("Authorization", authToken)
                         .setHeader("X-HTTP-Method-Override", "PATCH")
                         .executeWithJson(bodyAfter)
-                } else {
-                    logger.error("Failed Ghost Edit: Code ${response.statusCode} - ${response.text()}", null)
                 }
             } catch (e: Exception) {
                 logger.error("Error in Ghost Edit", e)
@@ -163,5 +239,7 @@ class GhostMessage : Plugin() {
 
     override fun stop(context: Context) {
         commands.unregisterAll()
+        patcher.unpatchAll()
     }
 }
+
