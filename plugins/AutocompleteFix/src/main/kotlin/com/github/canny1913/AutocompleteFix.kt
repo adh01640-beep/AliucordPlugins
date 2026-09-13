@@ -11,7 +11,7 @@ import java.lang.reflect.Method
 class MentionDedupeFix : Plugin() {
 
     companion object {
-        private val LOG = Logger("MentionDedupeFix")
+        private val LOG = Logger("AutocompleteFix")
         private const val COMPARATOR_CLASS = "com.discord.widgets.chat.input.autocomplete.AutocompletableComparator"
         private const val ADAPTER_CLASS = "com.discord.widgets.chat.input.autocomplete.adapter.ChatInputAutocompleteAdapter"
     }
@@ -37,7 +37,7 @@ class MentionDedupeFix : Plugin() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val result = param.result as? Int ?: return
                         
-                        // التدخل فقط إذا اعتبر ديسكورد العنصرين متطابقين بناءً على الاسم
+                        // plugin will start working only when the result is 0
                         if (result == 0) {
                             val o1 = param.args[0]
                             val o2 = param.args[1]
@@ -47,13 +47,13 @@ class MentionDedupeFix : Plugin() {
                             val id1 = extractStableIdFor(o1)
                             val id2 = extractStableIdFor(o2)
 
-                            // المقارنة بناءً على الـ ID الحقيقي بدلاً من الاسم المتطابق
+                            // autocomplete fix by id
                             if (id1 != null && id2 != null) {
                                 if (id1 != id2) {
                                     param.result = id1.compareTo(id2)
                                 }
                             } else {
-                                // حل جذري لأي عناصر أخرى (مثل الإيموجي أو خيارات السلاش) لا تملك ID مباشر
+                                
                                 param.result = System.identityHashCode(o1).compareTo(System.identityHashCode(o2))
                             }
                         }
@@ -61,7 +61,7 @@ class MentionDedupeFix : Plugin() {
                 })
             }
         } catch (t: Throwable) {
-            LOG.error("", t)
+            LOG.error("error detected", t)
         }
     }
 
@@ -86,12 +86,12 @@ class MentionDedupeFix : Plugin() {
                             param.result = uniqueId
                         }
                     } catch (inner: Throwable) {
-                        // التجاهل والعودة للعملية الأصلية
+                         
                     }
                 }
             })
         } catch (t: Throwable) {
-            LOG.error("خطأ أثناء إصلاح ChatInputAutocompleteAdapter", t)
+            LOG.error("error detected", t)
         }
     }
 
