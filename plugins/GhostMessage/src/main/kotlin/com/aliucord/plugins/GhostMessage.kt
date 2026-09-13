@@ -12,7 +12,9 @@ import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
+import com.aliucord.utils.DimenUtils
 import com.discord.stores.StoreStream
+import com.discord.utilities.rest.RestAPI
 import com.discord.widgets.chat.input.WidgetChatInputEditText
 import org.json.JSONObject
 import java.lang.Exception
@@ -21,28 +23,28 @@ import java.lang.Exception
 class GhostMessage : Plugin() {
 
     override fun start(context: Context) {
-        // حقن الزر في صندوق إدخال الشات
+        // Inject a button into the chat input box
         patcher.after(WidgetChatInputEditText::class.java, "onViewBound", View::class.java) { param ->
             val view = param.args[0] as View
-            
-            // سحب الحاوية الأب (التي تضم خانة الكتابة والأزرار الجانبية)
+
+            // Grab the parent container that holds the input field and side buttons
             val parentLayout = view.parent as? ViewGroup ?: return@after
 
-            // منع تكرار الزر إذا تم فتحه أكثر من مرة
+            // Avoid adding the button twice if this callback fires more than once
             if (parentLayout.findViewWithTag<View>("ghost_btn") != null) return@after
 
             val ghostBtn = ImageButton(context).apply {
                 tag = "ghost_btn"
-                // أيقونة سلة المهملات المدمجة في أندرويد
+                // Built-in Android trash icon, no custom resource needed
                 setImageDrawable(context.getDrawable(android.R.drawable.ic_menu_delete))
                 setBackgroundColor(Color.TRANSPARENT)
-                
-                // تعديل حجم وموقع الزر
+
+                // Size and spacing for the button
                 layoutParams = LinearLayout.LayoutParams(
-                    Utils.dpToPx(40),
-                    Utils.dpToPx(40)
+                    DimenUtils.dpToPx(40),
+                    DimenUtils.dpToPx(40)
                 ).apply {
-                    setMargins(0, 0, Utils.dpToPx(8), 0)
+                    setMargins(0, 0, DimenUtils.dpToPx(8), 0)
                 }
 
                 setOnClickListener {
@@ -54,8 +56,8 @@ class GhostMessage : Plugin() {
                     }
                 }
             }
-            
-            // إضافة الزر في بداية الحاوية بجانب الأزرار الأخرى
+
+            // Add the button at the start of the container, next to the other buttons
             parentLayout.addView(ghostBtn, 0)
         }
     }
@@ -74,8 +76,8 @@ class GhostMessage : Plugin() {
     }
 
     private fun showDeleteDialog(context: Context, channelId: Long) {
-        val input = EditText(context).apply { 
-            hint = "Message to send and immediately delete..." 
+        val input = EditText(context).apply {
+            hint = "Message to send and immediately delete..."
         }
         AlertDialog.Builder(context)
             .setTitle("Ghost Delete")
@@ -91,15 +93,15 @@ class GhostMessage : Plugin() {
     }
 
     private fun showEditDialog(context: Context, channelId: Long) {
-        val layout = LinearLayout(context).apply { 
-            orientation = LinearLayout.VERTICAL 
-            val padding = Utils.dpToPx(16)
+        val layout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            val padding = DimenUtils.dpToPx(16)
             setPadding(padding, padding, padding, padding)
         }
-        
+
         val inputBefore = EditText(context).apply { hint = "Message BEFORE edit..." }
         val inputAfter = EditText(context).apply { hint = "Message AFTER edit..." }
-        
+
         layout.addView(inputBefore)
         layout.addView(inputAfter)
 
@@ -122,18 +124,18 @@ class GhostMessage : Plugin() {
             try {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
                 val body = JSONObject().put("content", text).toString()
-                
-                // إرسال الرسالة
+
+                // Send the message
                 val response = Http.Request(url, "POST")
-                    .setHeader("Authorization", StoreStream.getAuthentication().token)
+                    .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
                     .setHeader("Content-Type", "application/json")
                     .executeWithJson(body)
-                
+
                 if (response.statusCode in 200..299) {
                     val msgId = JSONObject(response.text()).getString("id")
-                    // حذف الرسالة فوراً باستخدام الـ ID
+                    // Immediately delete the message using its ID
                     Http.Request("$url/$msgId", "DELETE")
-                        .setHeader("Authorization", StoreStream.getAuthentication().token)
+                        .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
                         .execute()
                 } else {
                     logger.error("Failed to send message for Ghost Delete: ${response.statusCode}", null)
@@ -149,20 +151,20 @@ class GhostMessage : Plugin() {
             try {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
                 val bodyBefore = JSONObject().put("content", before).toString()
-                
-                // إرسال الرسالة الأولى
+
+                // Send the first (decoy) message
                 val response = Http.Request(url, "POST")
-                    .setHeader("Authorization", StoreStream.getAuthentication().token)
+                    .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
                     .setHeader("Content-Type", "application/json")
                     .executeWithJson(bodyBefore)
-                
+
                 if (response.statusCode in 200..299) {
                     val msgId = JSONObject(response.text()).getString("id")
                     val bodyAfter = JSONObject().put("content", after).toString()
-                    
-                    // تعديل الرسالة فوراً بالنص الثاني
+
+                    // Immediately edit it to the real (second) message
                     Http.Request("$url/$msgId", "PATCH")
-                        .setHeader("Authorization", StoreStream.getAuthentication().token)
+                        .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
                         .setHeader("Content-Type", "application/json")
                         .executeWithJson(bodyAfter)
                 } else {
