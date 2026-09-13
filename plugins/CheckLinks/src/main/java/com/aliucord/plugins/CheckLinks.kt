@@ -39,7 +39,7 @@ class CheckLinks : Plugin() {
     override fun start(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 1. تسجيل أمر /checklink
+      // command /checklink
         val arguments = listOf(
             Utils.createCommandOption(
                 ApplicationCommandType.STRING,
@@ -68,7 +68,7 @@ class CheckLinks : Plugin() {
             }
         }
 
-        // 2. الهوك الخاص باعتراض الضغطات
+        
         try {
             val uriHandlerClass = Class.forName("com.discord.utilities.uri.UriHandler")
             
@@ -289,7 +289,7 @@ class CheckLinks : Plugin() {
                 .setNegativeButton("Cancel", null)
                 .show()
         } catch (e: Throwable) {
-            logger.error("Failed to show API key dialog", e)
+            logger.error("failed to show API key dialog", e)
         }
     }
 }
