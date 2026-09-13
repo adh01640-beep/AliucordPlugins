@@ -11,7 +11,6 @@ import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI.CommandResult
 import com.aliucord.entities.Plugin
-import com.aliucord.patcher.after
 import com.aliucord.utils.DimenUtils
 import com.discord.api.commands.ApplicationCommandType
 import com.discord.stores.StoreStream
@@ -79,8 +78,10 @@ class GhostMessage : Plugin() {
             "Automatically delete ALL messages and images you send from now on."
         ) {
             autoDeleteEnabled = true
-            activationSnowflake = (System.currentTimeMillis() - 1420070400000L) shl 22
-            CommandResult("✅ Auto-delete is now ON. Every new message or attachment you send will be deleted immediately.", null, false)
+            // طرح 60 ثانية لتجنب أي اختلاف زمني بين الهاتف وسيرفر ديسكورد
+            val adjustedTime = System.currentTimeMillis() - 60000L
+            activationSnowflake = (adjustedTime - 1420070400000L) shl 22
+            CommandResult("✅ Auto-delete is ON. New messages & attachments will be deleted.", null, false)
         }
 
         commands.registerCommand(
@@ -88,7 +89,7 @@ class GhostMessage : Plugin() {
             "Turn off automatic deletion."
         ) {
             autoDeleteEnabled = false
-            CommandResult("❌ Auto-delete is now OFF.", null, false)
+            CommandResult("❌ Auto-delete is OFF.", null, false)
         }
     }
 
@@ -107,26 +108,27 @@ class GhostMessage : Plugin() {
                         
                         val getAuthorMethod = messageClass.getMethod("getAuthor")
                         val author = getAuthorMethod.invoke(message) ?: return
-                        val authorClass = author::class.java
                         
-                        val getAuthorIdMethod = authorClass.getMethod("getId")
-                        val authorId = getAuthorIdMethod.invoke(author) as? Long ?: return
+                        // تحويل آمن للأرقام كـ String ثم Long لمنع كراش الـ Data Types
+                        val authorIdRaw = author::class.java.getMethod("getId").invoke(author)
+                        val authorId = authorIdRaw.toString().toLongOrNull() ?: return
                         
-                        val myId = StoreStream.getUsers().me.id
+                        val myIdRaw = StoreStream.getUsers().me.id
+                        val myId = myIdRaw.toString().toLongOrNull() ?: return
                         
                         if (authorId == myId) {
-                            val getIdMethod = messageClass.getMethod("getId")
-                            val msgId = getIdMethod.invoke(message) as? Long ?: return
+                            val msgIdRaw = messageClass.getMethod("getId").invoke(message)
+                            val msgId = msgIdRaw.toString().toLongOrNull() ?: return
                             
                             if (msgId > activationSnowflake) {
-                                val getChannelIdMethod = messageClass.getMethod("getChannelId")
-                                val channelId = getChannelIdMethod.invoke(message) as? Long ?: return
+                                val channelIdRaw = messageClass.getMethod("getChannelId").invoke(message)
+                                val channelId = channelIdRaw.toString().toLongOrNull() ?: return
                                 
                                 deleteMessageById(channelId, msgId.toString())
                             }
                         }
                     } catch (e: Exception) {
-                        // Ignore background exceptions
+                        // تجاهل الأخطاء الصامتة في الخلفية
                     }
                 }
             })
@@ -202,7 +204,7 @@ class GhostMessage : Plugin() {
 
                 if (response.statusCode in 200..299) {
                     val responseText = response.text()
-                    if (responseText != null && responseText.isNotEmpty()) {
+                    if (!responseText.isNullOrEmpty()) {
                         val msgId = JSONObject(responseText).getString("id")
                         Http.Request("$url/$msgId", "DELETE")
                             .setHeader("Authorization", authToken)
@@ -227,13 +229,13 @@ class GhostMessage : Plugin() {
 
                 if (response.statusCode in 200..299) {
                     val responseText = response.text()
-                    if (responseText != null && responseText.isNotEmpty()) {
+                    if (!responseText.isNullOrEmpty()) {
                         val msgId = JSONObject(responseText).getString("id")
                         val bodyAfter = mapOf("content" to after)
 
-                        Http.Request("$url/$msgId", "POST")
+                        // تم التعديل لـ PATCH المباشر
+                        Http.Request("$url/$msgId", "PATCH")
                             .setHeader("Authorization", authToken)
-                            .setHeader("X-HTTP-Method-Override", "PATCH")
                             .executeWithJson(bodyAfter)
                     }
                 }
