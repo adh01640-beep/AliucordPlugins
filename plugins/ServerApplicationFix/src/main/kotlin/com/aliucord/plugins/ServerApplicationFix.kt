@@ -8,14 +8,10 @@ import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
-import com.discord.models.domain.ModelInvite
-import com.discord.restapi.RestAPIParams
-import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
-import java.lang.reflect.Method
-import java.lang.reflect.Proxy
+import rx.Observable
 import java.util.concurrent.atomic.AtomicBoolean
 
 @AliucordPlugin(requiresRestart = false)
@@ -26,139 +22,122 @@ class ServerApplicationFix : Plugin() {
     }
 
     private val authToken: String
-        get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
+        get() = com.discord.utilities.rest.RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isBypassing = AtomicBoolean(false)
 
-    private fun createObservable(onSubscribe: (Any) -> Unit): Any {
-        val onSubscribeClass = Class.forName("rx.Observable\$OnSubscribe")
-        val proxy = Proxy.newProxyInstance(onSubscribeClass.classLoader, arrayOf(onSubscribeClass)) { _, method, args ->
-            if (method.name == "call" && args != null && args.isNotEmpty()) onSubscribe(args[0])
-            null
-        }
-        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)!!
-    }
-
-    private fun subscriberOnNext(subscriber: Any, value: Any?) {
-        subscriber.javaClass.getMethod("onNext", Any::class.java).invoke(subscriber, value)
-    }
-
-    private fun subscriberOnError(subscriber: Any, error: Throwable) {
-        subscriber.javaClass.getMethod("onError", Throwable::class.java).invoke(subscriber, error)
-    }
-
-    private fun subscriberOnCompleted(subscriber: Any) {
-        subscriber.javaClass.getMethod("onCompleted").invoke(subscriber)
-    }
-
-    private fun subscribeToObservable(
-        observable: Any,
-        onNext: (Any?) -> Unit,
-        onError: (Throwable) -> Unit,
-        onCompleted: () -> Unit,
-    ) {
-        val action1Class = Class.forName("rx.functions.Action1")
-        val action0Class = Class.forName("rx.functions.Action0")
-
-        val onNextProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
-            if (method.name == "call") onNext(if (args != null && args.isNotEmpty()) args[0] else null)
-            null
-        }
-        val onErrorProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
-            if (method.name == "call" && args != null && args.isNotEmpty()) onError(args[0] as Throwable)
-            null
-        }
-        val onCompletedProxy = Proxy.newProxyInstance(action0Class.classLoader, arrayOf(action0Class)) { _, method, _ ->
-            if (method.name == "call") onCompleted()
-            null
-        }
-
-        observable.javaClass
-            .getMethod("subscribe", action1Class, action1Class, action0Class)
-            .invoke(observable, onNextProxy, onErrorProxy, onCompletedProxy)
-    }
-
     override fun start(context: Context) {
         try {
-            val postInviteCode = RestAPI::class.java.getDeclaredMethod(
-                "postInviteCode",
-                ModelInvite::class.java,
-                String::class.java,
-                RestAPIParams.InviteCode::class.java,
-            )
+            val restAPI = Class.forName("com.discord.utilities.rest.RestAPI")
+            val targetMethods = restAPI.declaredMethods.filter { 
+                it.name == "postInviteCode" || it.name == "joinGuild" 
+            }
 
-            patcher.patch(postInviteCode, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (isBypassing.get()) return
+            for (method in targetMethods) {
+                patcher.patch(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (isBypassing.get()) return
 
-                    try {
-                        val inviteObj = param.args[0] ?: return
-                        val getCode = inviteObj.javaClass.getMethod("getCode")
-                        val getGuild = inviteObj.javaClass.getMethod("getGuild")
+                        try {
+                            val firstArg = param.args.firstOrNull() ?: return
+                            var inviteCode = ""
+                            var guildId = ""
+                            var guildName = "Unknown Server"
 
-                        val inviteCode = getCode.invoke(inviteObj) as? String ?: return
-                        val guildObj = getGuild.invoke(inviteObj) ?: return
+                            if (param.method.name == "joinGuild") {
+                                guildId = firstArg.toString()
+                            } else if (firstArg is String) {
+                                inviteCode = firstArg
+                            } else if (firstArg.javaClass.name.endsWith("ModelInvite")) {
+                                val getCode = firstArg.javaClass.getMethod("getCode")
+                                inviteCode = getCode.invoke(firstArg) as? String ?: return
 
-                        val getId = guildObj.javaClass.getMethod("getId")
-                        val guildId = (getId.invoke(guildObj) as? Number)?.toLong()?.toString() ?: return
+                                val getGuild = firstArg.javaClass.getMethod("getGuild")
+                                val guildObj = getGuild.invoke(firstArg)
+                                if (guildObj != null) {
+                                    val getId = guildObj.javaClass.getMethod("getId")
+                                    guildId = (getId.invoke(guildObj) as? Number)?.toLong()?.toString() ?: ""
+                                    try {
+                                        guildName = guildObj.javaClass.getMethod("getName").invoke(guildObj) as? String ?: "Unknown Server"
+                                    } catch (e: Exception) {}
+                                }
+                            } else {
+                                return
+                            }
 
-                        val guildName = try {
-                            guildObj.javaClass.getMethod("getName").invoke(guildObj) as? String
-                        } catch (e: Exception) {
-                            null
-                        } ?: "Unknown Server"
+                            param.result = Observable.create(Observable.OnSubscribe<Any> { subscriber ->
+                                Utils.threadPool.execute {
+                                    try {
+                                        var finalGuildId = guildId
+                                        var finalGuildName = guildName
 
-                        param.result = createObservable { subscriber ->
-                            Utils.threadPool.execute {
-                                try {
-                                    val url = "https://discord.com/api/v9/guilds/$guildId/member-verification"
-                                    val res = Http.Request(url, "GET")
-                                        .setHeader("Authorization", authToken)
-                                        .execute()
-
-                                    if (res.statusCode in 200..299) {
-                                        val json = JSONObject(res.text())
-                                        val formFields = json.optJSONArray("form_fields")
-
-                                        if (formFields != null && formFields.length() > 0) {
-                                            mainHandler.post {
-                                                val manager = Utils.appActivity?.supportFragmentManager
-                                                if (manager != null) {
-                                                    val sheet = ServerApplicationSheet(guildId, guildName, formFields, inviteCode, this@ServerApplicationFix)
-                                                    sheet.show(manager, "ServerApplicationSheet")
+                                        if (finalGuildId.isEmpty() && inviteCode.isNotEmpty()) {
+                                            val inviteUrl = "https://discord.com/api/v9/invites/$inviteCode"
+                                            val invRes = Http.Request(inviteUrl, "GET").execute()
+                                            if (invRes.statusCode in 200..299) {
+                                                val invJson = JSONObject(invRes.text())
+                                                val gObj = invJson.optJSONObject("guild")
+                                                if (gObj != null) {
+                                                    finalGuildId = gObj.optString("id")
+                                                    finalGuildName = gObj.optString("name", "Unknown Server")
                                                 }
                                             }
-                                            subscriberOnError(subscriber, Exception("Requires Application"))
-                                            return@execute
                                         }
-                                    }
 
-                                    isBypassing.set(true)
-                                    try {
-                                        val targetMethod = param.method as Method
-                                        val origObs = targetMethod.invoke(param.thisObject, *param.args)!!
-                                        subscribeToObservable(
-                                            origObs,
-                                            onNext = { result -> subscriberOnNext(subscriber, result) },
-                                            onError = { error -> subscriberOnError(subscriber, error) },
-                                            onCompleted = { subscriberOnCompleted(subscriber) },
-                                        )
+                                        if (finalGuildId.isNotEmpty()) {
+                                            val verifyUrl = "https://discord.com/api/v9/guilds/$finalGuildId/member-verification"
+                                            val res = Http.Request(verifyUrl, "GET")
+                                                .setHeader("Authorization", authToken)
+                                                .execute()
+
+                                            if (res.statusCode in 200..299) {
+                                                val json = JSONObject(res.text())
+                                                val formFields = json.optJSONArray("form_fields")
+
+                                                if (formFields != null && formFields.length() > 0) {
+                                                    mainHandler.post {
+                                                        val manager = Utils.appActivity?.supportFragmentManager
+                                                        if (manager != null) {
+                                                            val sheet = ServerApplicationSheet(finalGuildId, finalGuildName, formFields, inviteCode, this@ServerApplicationFix)
+                                                            sheet.show(manager, "ServerApplicationSheet")
+                                                        }
+                                                    }
+                                                    subscriber.onError(Exception("Requires Application"))
+                                                    return@execute
+                                                }
+                                            }
+                                        }
+
+                                        isBypassing.set(true)
+                                        try {
+                                            val targetMtd = param.method as java.lang.reflect.Method
+                                            val origObs = targetMtd.invoke(param.thisObject, *param.args) as Observable<Any>
+                                            origObs.subscribe(
+                                                { result -> subscriber.onNext(result) },
+                                                { error -> subscriber.onError(error) },
+                                                { subscriber.onCompleted() }
+                                            )
+                                        } catch (e: Exception) {
+                                            subscriber.onError(e)
+                                        } finally {
+                                            isBypassing.set(false)
+                                        }
+
                                     } catch (e: Exception) {
-                                        subscriberOnError(subscriber, e)
-                                    } finally {
-                                        isBypassing.set(false)
+                                        subscriber.onError(e)
                                     }
-
-                                } catch (e: Exception) {
-                                    subscriberOnError(subscriber, e)
                                 }
-                            }
+                            })
+                        } catch (e: Exception) {
+                            logger.error("Hook extraction error", e)
                         }
-                    } catch (e: Exception) {}
-                }
-            })
-        } catch (e: Exception) {}
+                    }
+                })
+            }
+        } catch (e: Exception) {
+            logger.error("Failed to hook RestAPI", e)
+        }
     }
 
     fun submitApplication(guildId: String, guildName: String, inputs: List<Pair<JSONObject, EditText>>, inviteCode: String) {
@@ -187,7 +166,9 @@ class ServerApplicationFix : Plugin() {
 
                 if (res.statusCode in 200..299) {
                     trackApplication(guildId, guildName)
-                    joinGuildDirect(inviteCode)
+                    if (inviteCode.isNotEmpty()) {
+                        joinGuildDirect(inviteCode)
+                    }
                 }
             } catch (e: Exception) {}
         }
