@@ -14,6 +14,7 @@ import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
+import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -33,10 +34,10 @@ class ServerApplicationFix : Plugin() {
     private fun createObservable(onSubscribe: (Any) -> Unit): Any {
         val onSubscribeClass = Class.forName("rx.Observable\$OnSubscribe")
         val proxy = Proxy.newProxyInstance(onSubscribeClass.classLoader, arrayOf(onSubscribeClass)) { _, method, args ->
-            if (method.name == "call") onSubscribe(args[0])
+            if (method.name == "call" && args != null && args.isNotEmpty()) onSubscribe(args[0])
             null
         }
-        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)
+        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)!!
     }
 
     private fun subscriberOnNext(subscriber: Any, value: Any?) {
@@ -61,11 +62,11 @@ class ServerApplicationFix : Plugin() {
         val action0Class = Class.forName("rx.functions.Action0")
 
         val onNextProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
-            if (method.name == "call") onNext(args?.getOrNull(0))
+            if (method.name == "call") onNext(if (args != null && args.isNotEmpty()) args[0] else null)
             null
         }
         val onErrorProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
-            if (method.name == "call") onError(args?.get(0) as Throwable)
+            if (method.name == "call" && args != null && args.isNotEmpty()) onError(args[0] as Throwable)
             null
         }
         val onCompletedProxy = Proxy.newProxyInstance(action0Class.classLoader, arrayOf(action0Class)) { _, method, _ ->
@@ -135,7 +136,8 @@ class ServerApplicationFix : Plugin() {
 
                                     isBypassing.set(true)
                                     try {
-                                        val origObs = param.method.invoke(param.thisObject, *param.args)!!
+                                        val targetMethod = param.method as Method
+                                        val origObs = targetMethod.invoke(param.thisObject, *param.args)!!
                                         subscribeToObservable(
                                             origObs,
                                             onNext = { result -> subscriberOnNext(subscriber, result) },
@@ -156,9 +158,7 @@ class ServerApplicationFix : Plugin() {
                     } catch (e: Exception) {}
                 }
             })
-        } catch (e: Exception) {
-            logger.error("start", e)
-        }
+        } catch (e: Exception) {}
     }
 
     fun submitApplication(guildId: String, guildName: String, inputs: List<Pair<JSONObject, EditText>>, inviteCode: String) {
@@ -204,8 +204,6 @@ class ServerApplicationFix : Plugin() {
         }
     }
 
-    // --- Application tracking (for the settings page) ---
-
     private fun trackApplication(guildId: String, guildName: String) {
         try {
             val current = JSONArray(settings.getString("applications", "[]"))
@@ -219,9 +217,7 @@ class ServerApplicationFix : Plugin() {
                 put("name", guildName)
             })
             settings.setString("applications", updated.toString())
-        } catch (e: Exception) {
-            logger.error("trackApplication", e)
-        }
+        } catch (e: Exception) {}
     }
 
     fun getTrackedApplications(): List<Pair<String, String>> {
