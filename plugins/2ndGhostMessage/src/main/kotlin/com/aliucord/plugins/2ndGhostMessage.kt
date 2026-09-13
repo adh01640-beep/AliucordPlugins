@@ -109,20 +109,22 @@ class GhostMessage : Plugin() {
         Utils.threadPool.execute {
             try {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
-                val body = JSONObject().put("content", text).toString()
+                
+                // تمرير البيانات كـ Map لمنع التشفير المزدوج
+                val body = mapOf("content" to text)
 
                 val response = Http.Request(url, "POST")
                     .setHeader("Authorization", authToken)
-                    .setHeader("Content-Type", "application/json")
                     .executeWithJson(body)
 
                 if (response.statusCode in 200..299) {
                     val msgId = JSONObject(response.text()).getString("id")
+                    
                     Http.Request("$url/$msgId", "DELETE")
                         .setHeader("Authorization", authToken)
                         .execute()
                 } else {
-                    logger.error("Failed to send message for Ghost Delete: ${response.statusCode}", null)
+                    logger.error("Failed Ghost Delete: Code ${response.statusCode} - ${response.text()}", null)
                 }
             } catch (e: Exception) {
                 logger.error("Error in Ghost Delete", e)
@@ -134,23 +136,24 @@ class GhostMessage : Plugin() {
         Utils.threadPool.execute {
             try {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
-                val bodyBefore = JSONObject().put("content", before).toString()
+                
+                val bodyBefore = mapOf("content" to before)
 
                 val response = Http.Request(url, "POST")
                     .setHeader("Authorization", authToken)
-                    .setHeader("Content-Type", "application/json")
                     .executeWithJson(bodyBefore)
 
                 if (response.statusCode in 200..299) {
                     val msgId = JSONObject(response.text()).getString("id")
-                    val bodyAfter = JSONObject().put("content", after).toString()
+                    val bodyAfter = mapOf("content" to after)
 
-                    Http.Request("$url/$msgId", "PATCH")
+                    // استخدام POST مع هيدر التخطي بدلاً من PATCH الممنوع في أندرويد
+                    Http.Request("$url/$msgId", "POST")
                         .setHeader("Authorization", authToken)
-                        .setHeader("Content-Type", "application/json")
+                        .setHeader("X-HTTP-Method-Override", "PATCH")
                         .executeWithJson(bodyAfter)
                 } else {
-                    logger.error("Failed to send message for Ghost Edit: ${response.statusCode}", null)
+                    logger.error("Failed Ghost Edit: Code ${response.statusCode} - ${response.text()}", null)
                 }
             } catch (e: Exception) {
                 logger.error("Error in Ghost Edit", e)
