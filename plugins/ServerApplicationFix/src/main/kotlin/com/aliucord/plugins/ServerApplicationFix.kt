@@ -11,7 +11,8 @@ import com.aliucord.entities.Plugin
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
-import rx.Observable
+import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 import java.util.concurrent.atomic.AtomicBoolean
 
 @AliucordPlugin(requiresRestart = false)
@@ -26,6 +27,54 @@ class ServerApplicationFix : Plugin() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isBypassing = AtomicBoolean(false)
+
+    private fun createObservable(onSubscribe: (Any) -> Unit): Any {
+        val onSubscribeClass = Class.forName("rx.Observable\$OnSubscribe")
+        val proxy = Proxy.newProxyInstance(onSubscribeClass.classLoader, arrayOf(onSubscribeClass)) { _, method, args ->
+            if (method.name == "call" && args != null && args.isNotEmpty()) onSubscribe(args[0])
+            null
+        }
+        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)!!
+    }
+
+    private fun subscriberOnNext(subscriber: Any, value: Any?) {
+        subscriber.javaClass.getMethod("onNext", Any::class.java).invoke(subscriber, value)
+    }
+
+    private fun subscriberOnError(subscriber: Any, error: Throwable) {
+        subscriber.javaClass.getMethod("onError", Throwable::class.java).invoke(subscriber, error)
+    }
+
+    private fun subscriberOnCompleted(subscriber: Any) {
+        subscriber.javaClass.getMethod("onCompleted").invoke(subscriber)
+    }
+
+    private fun subscribeToObservable(
+        observable: Any,
+        onNext: (Any?) -> Unit,
+        onError: (Throwable) -> Unit,
+        onCompleted: () -> Unit,
+    ) {
+        val action1Class = Class.forName("rx.functions.Action1")
+        val action0Class = Class.forName("rx.functions.Action0")
+
+        val onNextProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
+            if (method.name == "call") onNext(if (args != null && args.isNotEmpty()) args[0] else null)
+            null
+        }
+        val onErrorProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
+            if (method.name == "call" && args != null && args.isNotEmpty()) onError(args[0] as Throwable)
+            null
+        }
+        val onCompletedProxy = Proxy.newProxyInstance(action0Class.classLoader, arrayOf(action0Class)) { _, method, _ ->
+            if (method.name == "call") onCompleted()
+            null
+        }
+
+        observable.javaClass
+            .getMethod("subscribe", action1Class, action1Class, action0Class)
+            .invoke(observable, onNextProxy, onErrorProxy, onCompletedProxy)
+    }
 
     override fun start(context: Context) {
         try {
@@ -66,7 +115,7 @@ class ServerApplicationFix : Plugin() {
                                 return
                             }
 
-                            param.result = Observable.create(Observable.OnSubscribe<Any> { subscriber ->
+                            param.result = createObservable { subscriber ->
                                 Utils.threadPool.execute {
                                     try {
                                         var finalGuildId = guildId
@@ -103,7 +152,7 @@ class ServerApplicationFix : Plugin() {
                                                             sheet.show(manager, "ServerApplicationSheet")
                                                         }
                                                     }
-                                                    subscriber.onError(Exception("Requires Application"))
+                                                    subscriberOnError(subscriber, Exception("Requires Application"))
                                                     return@execute
                                                 }
                                             }
@@ -111,24 +160,25 @@ class ServerApplicationFix : Plugin() {
 
                                         isBypassing.set(true)
                                         try {
-                                            val targetMtd = param.method as java.lang.reflect.Method
-                                            val origObs = targetMtd.invoke(param.thisObject, *param.args) as Observable<Any>
-                                            origObs.subscribe(
-                                                { result -> subscriber.onNext(result) },
-                                                { error -> subscriber.onError(error) },
-                                                { subscriber.onCompleted() }
+                                            val targetMtd = param.method as Method
+                                            val origObs = targetMtd.invoke(param.thisObject, *param.args)!!
+                                            subscribeToObservable(
+                                                origObs,
+                                                onNext = { result -> subscriberOnNext(subscriber, result) },
+                                                onError = { error -> subscriberOnError(subscriber, error) },
+                                                onCompleted = { subscriberOnCompleted(subscriber) }
                                             )
                                         } catch (e: Exception) {
-                                            subscriber.onError(e)
+                                            subscriberOnError(subscriber, e)
                                         } finally {
                                             isBypassing.set(false)
                                         }
 
                                     } catch (e: Exception) {
-                                        subscriber.onError(e)
+                                        subscriberOnError(subscriber, e)
                                     }
                                 }
-                            })
+                            }
                         } catch (e: Exception) {
                             logger.error("Hook extraction error", e)
                         }
