@@ -15,6 +15,7 @@ import com.aliucord.utils.DimenUtils
 import com.discord.api.commands.ApplicationCommandType
 import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
+import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONObject
 import java.lang.Exception
 
@@ -95,37 +96,39 @@ class GhostMessage : Plugin() {
         val methods = storeMessagesClass.declaredMethods.filter { it.name == "handleMessageCreate" }
         
         for (method in methods) {
-            patcher.after(storeMessagesClass, method.name, method.parameterTypes) { param ->
-                if (!autoDeleteEnabled) return@after
+            patcher.patch(method, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!autoDeleteEnabled) return
 
-                try {
-                    val message = param.args.firstOrNull() ?: return@after
-                    val messageClass = message::class.java
-                    
-                    val getAuthorMethod = messageClass.getMethod("getAuthor")
-                    val author = getAuthorMethod.invoke(message) ?: return@after
-                    val authorClass = author::class.java
-                    
-                    val getAuthorIdMethod = authorClass.getMethod("getId")
-                    val authorId = getAuthorIdMethod.invoke(author) as? Long ?: return@after
-                    
-                    val myId = StoreStream.getUsers().me.id
-                    
-                    if (authorId == myId) {
-                        val getIdMethod = messageClass.getMethod("getId")
-                        val msgId = getIdMethod.invoke(message) as? Long ?: return@after
+                    try {
+                        val message = param.args.firstOrNull() ?: return
+                        val messageClass = message::class.java
                         
-                        if (msgId > activationSnowflake) {
-                            val getChannelIdMethod = messageClass.getMethod("getChannelId")
-                            val channelId = getChannelIdMethod.invoke(message) as? Long ?: return@after
+                        val getAuthorMethod = messageClass.getMethod("getAuthor")
+                        val author = getAuthorMethod.invoke(message) ?: return
+                        val authorClass = author::class.java
+                        
+                        val getAuthorIdMethod = authorClass.getMethod("getId")
+                        val authorId = getAuthorIdMethod.invoke(author) as? Long ?: return
+                        
+                        val myId = StoreStream.getUsers().me.id
+                        
+                        if (authorId == myId) {
+                            val getIdMethod = messageClass.getMethod("getId")
+                            val msgId = getIdMethod.invoke(message) as? Long ?: return
                             
-                            deleteMessageById(channelId, msgId.toString())
+                            if (msgId > activationSnowflake) {
+                                val getChannelIdMethod = messageClass.getMethod("getChannelId")
+                                val channelId = getChannelIdMethod.invoke(message) as? Long ?: return
+                                
+                                deleteMessageById(channelId, msgId.toString())
+                            }
                         }
+                    } catch (e: Exception) {
+                        // Ignore background exceptions
                     }
-                } catch (e: Exception) {
-                    // Ignore silent background exceptions
                 }
-            }
+            })
         }
     }
 
@@ -238,3 +241,4 @@ class GhostMessage : Plugin() {
         patcher.unpatchAll()
     }
 }
+q
