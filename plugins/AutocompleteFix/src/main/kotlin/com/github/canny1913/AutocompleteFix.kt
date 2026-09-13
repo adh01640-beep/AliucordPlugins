@@ -61,7 +61,7 @@ class MentionDedupeFix : Plugin() {
                 })
             }
         } catch (t: Throwable) {
-            LOG.error("خطأ أثناء إصلاح AutocompletableComparator", t)
+            LOG.error("", t)
         }
     }
 
@@ -98,7 +98,7 @@ class MentionDedupeFix : Plugin() {
     private fun extractStableIdFor(autocompletable: Any?): Long? {
         if (autocompletable == null) return null
         
-        // 1. المستخدمين
+        // user mentions autocompletefix
         try {
             val getUser = autocompletable.javaClass.getMethod("getUser")
             val user = getUser.invoke(autocompletable)
@@ -108,7 +108,7 @@ class MentionDedupeFix : Plugin() {
             }
         } catch (e: Throwable) { }
 
-        // 2. الرتب
+        // roles autocompletefix
         try {
             val getRole = autocompletable.javaClass.getMethod("getRole")
             val role = getRole.invoke(autocompletable)
@@ -118,7 +118,7 @@ class MentionDedupeFix : Plugin() {
             }
         } catch (e: Throwable) { }
 
-        // 3. السلاش كوماندز
+        // slash commands so it will work on slash commands too
         try {
             val getCommand = autocompletable.javaClass.getMethod("getCommand")
             val command = getCommand.invoke(autocompletable)
