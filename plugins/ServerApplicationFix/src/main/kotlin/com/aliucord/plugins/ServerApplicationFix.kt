@@ -12,6 +12,7 @@ import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 @AliucordPlugin(requiresRestart = false)
 class ServerApplicationFix : Plugin() {
@@ -20,59 +21,101 @@ class ServerApplicationFix : Plugin() {
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val isBypassing = AtomicBoolean(false)
 
     override fun start(context: Context) {
-        val inviteJoinHelper = Class.forName("com.discord.widgets.guilds.invite.InviteJoinHelper")
-        val methods = inviteJoinHelper.declaredMethods.filter { it.name == "joinViaInvite" }
+        try {
+            val restApiClass = Class.forName("com.discord.utilities.rest.RestAPI")
+            val targetMethods = restApiClass.declaredMethods.filter { 
+                it.name == "postInviteCode" 
+            }
 
-        for (method in methods) {
-            patcher.patch(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    try {
-                        val inviteObj = param.args[0] ?: return
-                        val getCode = inviteObj.javaClass.getMethod("getCode")
-                        val getGuild = inviteObj.javaClass.getMethod("getGuild")
-                        
-                        val inviteCode = getCode.invoke(inviteObj) as? String ?: return
-                        val guildObj = getGuild.invoke(inviteObj) ?: return
-                        
-                        val getId = guildObj.javaClass.getMethod("getId")
-                        val guildId = (getId.invoke(guildObj) as? Number)?.toLong()?.toString() ?: return
+            for (method in targetMethods) {
+                patcher.patch(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (isBypassing.get()) {
+                            return
+                        }
+
+                        val inviteCode = when (val arg = param.args[0]) {
+                            is String -> arg
+                            else -> {
+                                try {
+                                    val getCode = arg.javaClass.getMethod("getCode")
+                                    getCode.invoke(arg) as? String
+                                } catch (e: Exception) {
+                                    null
+                                }
+                            }
+                        } ?: return
 
                         param.result = null
-                        fetchAndShowApplication(inviteCode, guildId)
-                    } catch (e: Exception) {}
-                }
-            })
+
+                        checkVerificationAndProceed(inviteCode) {
+                            proceedOriginalJoin(param.thisObject, method, param.args)
+                        }
+                    }
+                })
+            }
+        } catch (e: Exception) {
+            logger.error("Failed to patch postInviteCode", e)
         }
     }
 
-    private fun fetchAndShowApplication(inviteCode: String, guildId: String) {
+    private fun checkVerificationAndProceed(inviteCode: String, onNoForm: () -> Unit) {
         Utils.threadPool.execute {
             try {
-                val url = "https://discord.com/api/v9/guilds/$guildId/member-verification"
-                val response = Http.Request(url, "GET")
+                val inviteUrl = "https://discord.com/api/v9/invites/$inviteCode"
+                val inviteRes = Http.Request(inviteUrl, "GET")
                     .setHeader("Authorization", authToken)
                     .execute()
 
-                if (response.statusCode in 200..299) {
-                    val json = JSONObject(response.text())
-                    val formFields = json.optJSONArray("form_fields") ?: JSONArray()
+                if (inviteRes.statusCode in 200..299) {
+                    val inviteJson = JSONObject(inviteRes.text())
+                    val guild = inviteJson.optJSONObject("guild")
+                    val guildId = guild?.optString("id")
 
-                    if (formFields.length() > 0) {
-                        mainHandler.post {
-                            val manager = Utils.appActivity?.supportFragmentManager ?: return@post
-                            val sheet = ServerApplicationSheet(guildId, formFields, inviteCode, this)
-                            sheet.show(manager, "ServerApplicationSheet")
+                    if (guildId != null) {
+                        val verifyUrl = "https://discord.com/api/v9/guilds/$guildId/member-verification"
+                        val verifyRes = Http.Request(verifyUrl, "GET")
+                            .setHeader("Authorization", authToken)
+                            .execute()
+
+                        if (verifyRes.statusCode in 200..299) {
+                            val verifyJson = JSONObject(verifyRes.text())
+                            val formFields = verifyJson.optJSONArray("form_fields") ?: JSONArray()
+
+                            if (formFields.length() > 0) {
+                                mainHandler.post {
+                                    val manager = Utils.appActivity?.supportFragmentManager
+                                    if (manager != null) {
+                                        val sheet = ServerApplicationSheet(guildId, formFields, inviteCode, this)
+                                        sheet.show(manager, "ServerApplicationSheet")
+                                    } else {
+                                        onNoForm()
+                                    }
+                                }
+                                return@execute
+                            }
                         }
-                    } else {
-                        joinGuild(inviteCode)
                     }
-                } else {
-                    joinGuild(inviteCode)
                 }
+                onNoForm()
             } catch (e: Exception) {
-                joinGuild(inviteCode)
+                onNoForm()
+            }
+        }
+    }
+
+    private fun proceedOriginalJoin(instance: Any, method: java.lang.reflect.Method, args: Array<Any?>) {
+        mainHandler.post {
+            try {
+                isBypassing.set(true)
+                method.invoke(instance, *args)
+            } catch (e: Exception) {
+                logger.error("Failed to invoke original join", e)
+            } finally {
+                isBypassing.set(false)
             }
         }
     }
@@ -102,19 +145,11 @@ class ServerApplicationFix : Plugin() {
                     .executeWithJson(body)
 
                 if (res.statusCode in 200..299) {
-                    joinGuild(inviteCode)
+                    val joinUrl = "https://discord.com/api/v9/invites/$inviteCode"
+                    Http.Request(joinUrl, "POST")
+                        .setHeader("Authorization", authToken)
+                        .execute()
                 }
-            } catch (e: Exception) {}
-        }
-    }
-
-    private fun joinGuild(inviteCode: String) {
-        Utils.threadPool.execute {
-            try {
-                val url = "https://discord.com/api/v9/invites/$inviteCode"
-                Http.Request(url, "POST")
-                    .setHeader("Authorization", authToken)
-                    .execute()
             } catch (e: Exception) {}
         }
     }
