@@ -11,6 +11,7 @@ import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI.CommandResult
 import com.aliucord.entities.Plugin
+import com.aliucord.patcher.after
 import com.aliucord.utils.DimenUtils
 import com.discord.api.commands.ApplicationCommandType
 import com.discord.stores.StoreStream
@@ -200,10 +201,13 @@ class GhostMessage : Plugin() {
                     .executeWithJson(body)
 
                 if (response.statusCode in 200..299) {
-                    val msgId = JSONObject(response.text()).getString("id")
-                    Http.Request("$url/$msgId", "DELETE")
-                        .setHeader("Authorization", authToken)
-                        .execute()
+                    val responseText = response.text()
+                    if (responseText != null && responseText.isNotEmpty()) {
+                        val msgId = JSONObject(responseText).getString("id")
+                        Http.Request("$url/$msgId", "DELETE")
+                            .setHeader("Authorization", authToken)
+                            .execute()
+                    }
                 }
             } catch (e: Exception) {
                 logger.error("Error in Ghost Delete", e)
@@ -222,13 +226,16 @@ class GhostMessage : Plugin() {
                     .executeWithJson(bodyBefore)
 
                 if (response.statusCode in 200..299) {
-                    val msgId = JSONObject(response.text()).getString("id")
-                    val bodyAfter = mapOf("content" to after)
+                    val responseText = response.text()
+                    if (responseText != null && responseText.isNotEmpty()) {
+                        val msgId = JSONObject(responseText).getString("id")
+                        val bodyAfter = mapOf("content" to after)
 
-                    Http.Request("$url/$msgId", "POST")
-                        .setHeader("Authorization", authToken)
-                        .setHeader("X-HTTP-Method-Override", "PATCH")
-                        .executeWithJson(bodyAfter)
+                        Http.Request("$url/$msgId", "POST")
+                            .setHeader("Authorization", authToken)
+                            .setHeader("X-HTTP-Method-Override", "PATCH")
+                            .executeWithJson(bodyAfter)
+                    }
                 }
             } catch (e: Exception) {
                 logger.error("Error in Ghost Edit", e)
@@ -241,4 +248,3 @@ class GhostMessage : Plugin() {
         patcher.unpatchAll()
     }
 }
-q
