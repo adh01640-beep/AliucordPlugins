@@ -16,12 +16,14 @@ import com.discord.api.commands.ApplicationCommandType
 import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
+import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.Exception
 
 @AliucordPlugin(requiresRestart = false)
 class GhostMessage : Plugin() {
 
+    // Grab the auth token directly from Discord's internal provider
     private val authToken: String
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
@@ -78,6 +80,8 @@ class GhostMessage : Plugin() {
             "Automatically delete ALL messages and images you send from now on."
         ) {
             autoDeleteEnabled = true
+            // Subtract 1 min just in case our phone's clock is slightly ahead of Discord's servers.
+            // If we don't do this, the snowflake might be too new and we end up ignoring our own messages.
             val adjustedTime = System.currentTimeMillis() - 60000L
             activationSnowflake = (adjustedTime - 1420070400000L) shl 22
             CommandResult("✅ Auto-delete is ON. New messages & attachments will be deleted.", null, false)
@@ -94,7 +98,6 @@ class GhostMessage : Plugin() {
 
     private fun hookIncomingMessages() {
         val storeMessagesClass = StoreStream.getMessages()::class.java
-        // تتبع الإنشاء والتحديث لضمان اصطياد الصور بعد اكتمال الرفع
         val methods = storeMessagesClass.declaredMethods.filter { 
             it.name == "handleMessageCreate" || it.name == "handleMessageUpdate" 
         }
@@ -106,66 +109,90 @@ class GhostMessage : Plugin() {
 
                     try {
                         val arg = param.args.firstOrNull() ?: return
-                        
-                        // استخراج الرسايل سواء كانت قائمة (List) أو رسالة واحدة
                         val messages = if (arg is Iterable<*>) arg.toList() else listOf(arg)
 
-                        for (message in messages) {
-                            if (message == null) continue
-                            val messageClass = message::class.java
+                        for (item in messages) {
+                            if (item == null) continue
                             
-                            // التأكد إن ده أوبجكت رسالة فعلاً
-                            val getAuthorMethod = try {
-                                messageClass.getMethod("getAuthor")
-                            } catch (e: Exception) { continue }
+                            // Dumping the object to JSON and parsing it back.
+                            // Kinda hacky, but saves us from reflection hell and random crashes on different Discord versions.
+                            val jsonStr = Utils.gson.toJson(item)
+                            val jsonObj = JSONObject(jsonStr)
                             
-                            val author = getAuthorMethod.invoke(message) ?: continue
+                            val msgObj = jsonObj.optJSONObject("message") ?: jsonObj
                             
-                            val authorIdRaw = try {
-                                author::class.java.getMethod("getId").invoke(author)
-                            } catch (e: Exception) { continue }
-                            
-                            val authorId = authorIdRaw.toString().toLongOrNull() ?: continue
-                            val myId = StoreStream.getUsers().me.id.toString().toLongOrNull() ?: continue
-                            
-                            if (authorId == myId) {
-                                val msgIdRaw = messageClass.getMethod("getId").invoke(message)
-                                val msgId = msgIdRaw.toString().toLongOrNull() ?: continue
-                                
-                                if (msgId > activationSnowflake) {
-                                    val channelIdRaw = messageClass.getMethod("getChannelId").invoke(message)
-                                    val channelId = channelIdRaw.toString().toLongOrNull() ?: continue
-                                    
-                                    // تمرير الطلب لدالة الحذف مع إعطاءها 3 محاولات (Retries)
-                                    deleteMessageById(channelId, msgId.toString(), 3)
+                            val authorObj = msgObj.optJSONObject("author")
+                            val authorId = authorObj?.optString("id")?.toLongOrNull() ?: 0L
+                            val myId = StoreStream.getUsers().me.id
+
+                            // Double check if it's actually our message
+                            if (authorId == myId && authorId != 0L) {
+                                val channelId = msgObj.optString("channelId").toLongOrNull() ?: 0L
+                                if (channelId != 0L) {
+                                    // Trigger the fetch & delete cycle. 4 retries give images enough time to upload (~6s total)
+                                    deleteLatestMessagesFromMe(channelId, 4)
+                                    break
                                 }
                             }
                         }
                     } catch (e: Exception) {
-                        // تجاهل الأخطاء العابرة
+                        // Just swallow it so we don't crash the UI thread
                     }
                 }
             })
         }
     }
 
-    // دالة حذف مجهزة بنظام انتظار ومحاولات لتخطي تأخير رفع الصور والمقاطع
-    private fun deleteMessageById(channelId: Long, msgId: String, retries: Int) {
+    // The magic trick: Discord creates fake "local" IDs for instant UI updates.
+    // Deleting those local IDs obviously fails on the server.
+    // Workaround: Wait a bit, fetch our recent msgs from the API to get the REAL server IDs, then wipe them.
+    private fun deleteLatestMessagesFromMe(channelId: Long, retries: Int) {
         Utils.threadPool.execute {
             try {
-                Thread.sleep(1500) // انتظار ثانية ونصف لضمان وصول الرسالة للسيرفر
-                val url = "https://discord.com/api/v9/channels/$channelId/messages/$msgId"
-                val response = Http.Request(url, "DELETE")
+                Thread.sleep(1500) // Let the server process the message first
+                val url = "https://discord.com/api/v9/channels/$channelId/messages?limit=10"
+                val response = Http.Request(url, "GET")
                     .setHeader("Authorization", authToken)
                     .execute()
 
-                // لو السيرفر رفض (مثلاً لسه بتترفع) وعندنا محاولات باقية، نجرب تاني
-                if (response.statusCode !in 200..299 && retries > 0) {
-                    deleteMessageById(channelId, msgId, retries - 1)
+                if (response.statusCode in 200..299) {
+                    val responseText = response.text()
+                    if (responseText.isNullOrEmpty()) return@execute
+                    
+                    val msgs = JSONArray(responseText)
+                    val myId = StoreStream.getUsers().me.id.toString()
+                    var foundAndDeleted = false
+                    
+                    for (i in 0 until msgs.length()) {
+                        val msg = msgs.getJSONObject(i)
+                        val author = msg.optJSONObject("author") ?: continue
+                        val authorId = author.optString("id")
+                        
+                        if (authorId == myId) {
+                            val msgId = msg.optString("id")
+                            val msgIdLong = msgId.toLongOrNull() ?: 0L
+                            
+                            // Only delete if it was sent after we turned the feature on
+                            if (msgIdLong > activationSnowflake) {
+                                val delUrl = "https://discord.com/api/v9/channels/$channelId/messages/$msgId"
+                                Http.Request(delUrl, "DELETE")
+                                    .setHeader("Authorization", authToken)
+                                    .execute()
+                                foundAndDeleted = true
+                            }
+                        }
+                    }
+                    
+                    // If we didn't find it (maybe it's a huge image still uploading), try again
+                    if (!foundAndDeleted && retries > 0) {
+                        deleteLatestMessagesFromMe(channelId, retries - 1)
+                    }
+                } else if (retries > 0) {
+                    deleteLatestMessagesFromMe(channelId, retries - 1)
                 }
             } catch (e: Exception) {
                 if (retries > 0) {
-                    deleteMessageById(channelId, msgId, retries - 1)
+                    deleteLatestMessagesFromMe(channelId, retries - 1)
                 }
             }
         }
@@ -221,6 +248,7 @@ class GhostMessage : Plugin() {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
                 val body = mapOf("content" to text)
 
+                // Fire the POST request and instantly DELETE it once we get the real ID back
                 val response = Http.Request(url, "POST")
                     .setHeader("Authorization", authToken)
                     .executeWithJson(body)
@@ -256,6 +284,7 @@ class GhostMessage : Plugin() {
                         val msgId = JSONObject(responseText).getString("id")
                         val bodyAfter = mapOf("content" to after)
 
+                        // Using PATCH directly since the Http wrapper handles it fine
                         Http.Request("$url/$msgId", "PATCH")
                             .setHeader("Authorization", authToken)
                             .executeWithJson(bodyAfter)
