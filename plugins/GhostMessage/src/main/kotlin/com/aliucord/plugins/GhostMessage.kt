@@ -18,12 +18,17 @@ import com.aliucord.patcher.component2
 import com.aliucord.utils.DimenUtils
 import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
+import com.discord.widgets.chat.input.WidgetChatInput
 import com.discord.widgets.chat.input.WidgetChatInputEditText
 import org.json.JSONObject
 import java.lang.Exception
 
 @AliucordPlugin(requiresRestart = false)
 class GhostMessage : Plugin() {
+
+    companion object {
+        private const val MAX_CLIMB = 6
+    }
 
     // Both endpoints need the current user's token in the Authorization header.
     // RestAPI.AppHeadersProvider is a Java-style singleton on Discord's side, so
@@ -32,10 +37,22 @@ class GhostMessage : Plugin() {
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
     override fun start(context: Context) {
-        // Inject a button into the chat input box
-        patcher.after<WidgetChatInputEditText>("onViewBound", View::class.java) { (_, view: View) ->
-            // Grab the parent container that holds the input field and side buttons
-            val parentLayout = view.parent as? ViewGroup ?: return@after
+        // WidgetChatInput.onViewBound(View) fires with the ROOT view of the whole
+        // chat input screen (edit text + attach/emoji/send buttons all included).
+        // This is the confirmed real hook point - WidgetChatInputEditText itself
+        // does NOT have an onViewBound method, only onKey/onEditorAction.
+        patcher.after<WidgetChatInput>("onViewBound", View::class.java) { (_, root: View) ->
+            // Locate the actual EditText inside the fragment's view tree
+            val editText = findEditText(root) ?: run {
+                logger.error("GhostMessage: could not find WidgetChatInputEditText in the chat input view tree", null)
+                return@after
+            }
+
+            // From the EditText, climb up until we find the row that already
+            // holds more than one child - that's the real icon row (attach,
+            // emoji, send, etc.), since the EditText's direct parent is usually
+            // just a thin auto-grow wrapper.
+            val parentLayout = findIconRow(editText) ?: return@after
 
             // Avoid adding the button twice if this callback fires more than once
             if (parentLayout.findViewWithTag<View>("ghost_btn") != null) return@after
@@ -64,9 +81,34 @@ class GhostMessage : Plugin() {
                 }
             }
 
-            // Add the button at the start of the container, next to the other buttons
+            // Add the button at the start of the row, next to the other icons
             parentLayout.addView(ghostBtn, 0)
         }
+    }
+
+    // Recursively search the view tree for the chat input EditText instance
+    private fun findEditText(view: View): WidgetChatInputEditText? {
+        if (view is WidgetChatInputEditText) return view
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                val found = findEditText(view.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    // Walk up the view tree from the EditText until a ViewGroup with more than
+    // one child is found (the actual icon row), instead of assuming a fixed depth.
+    private fun findIconRow(start: View): ViewGroup? {
+        var current: View = start
+        repeat(MAX_CLIMB) {
+            val parent = current.parent as? ViewGroup ?: return null
+            if (parent.childCount > 1) return parent
+            current = parent
+        }
+        logger.error("GhostMessage: could not locate the chat input icon row after climbing $MAX_CLIMB levels", null)
+        return null
     }
 
     private fun showModeSelectionDialog(context: Context, channelId: Long) {
