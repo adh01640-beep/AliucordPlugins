@@ -23,23 +23,54 @@ class ServerApplicationFix : Plugin() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun start(context: Context) {
-        hookInviteButtons()
+        hookInviteSheet()
     }
 
-    private fun hookInviteButtons() {
-        val targetListeners = listOf(
-            "com.discord.widgets.guilds.invite.WidgetGuildInvite\$onViewBound\$1",
-            "com.discord.widgets.guilds.invite.WidgetGuildInvite\$configureLoadedUI\$onAcceptClick\$1"
-        )
+    private fun hookInviteSheet() {
+        try {
+            val widgetGuildInviteClass = Class.forName("com.discord.widgets.guilds.invite.WidgetGuildInvite")
+            
+            // هوك على دالة تهيئة الواجهة بعد جلب بيانات الدعوة
+            val targetMethods = widgetGuildInviteClass.declaredMethods.filter { 
+                it.name == "configureLoadedUI" || it.name == "configureUI" 
+            }
 
-        for (className in targetListeners) {
-            try {
-                val clazz = Class.forName(className)
-                patcher.patch(clazz, "onClick", arrayOf(View::class.java), object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            for (method in targetMethods) {
+                patcher.patch(method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
                         try {
-                            val instance = param.thisObject
-                            val inviteObj = extractModelInvite(instance) ?: return
+                            val widgetInstance = param.thisObject
+                            
+                            // استخراج الزر f2424b من getBinding()
+                            val getBindingMethod = widgetInstance.javaClass.getMethod("getBinding")
+                            val bindingObj = getBindingMethod.invoke(widgetInstance) ?: return
+                            
+                            val btnField = bindingObj.javaClass.getDeclaredField("b")
+                            btnField.isAccessible = true
+                            val joinButton = btnField.get(bindingObj) as? View ?: return
+
+                            // استخراج كائن ModelInvite الممرر للدالة أو المخزن في الـ Widget
+                            var inviteObj: Any? = null
+                            for (arg in param.args) {
+                                if (arg != null && arg.javaClass.name.contains("ModelInvite")) {
+                                    inviteObj = arg
+                                    break
+                                }
+                            }
+
+                            if (inviteObj == null) {
+                                // محاولة إيجاده داخل حقول الـ Widget
+                                for (f in widgetInstance.javaClass.declaredFields) {
+                                    f.isAccessible = true
+                                    val v = f.get(widgetInstance)
+                                    if (v != null && v.javaClass.name.contains("ModelInvite")) {
+                                        inviteObj = v
+                                        break
+                                    }
+                                }
+                            }
+
+                            if (inviteObj == null) return
 
                             val getCode = inviteObj.javaClass.getMethod("getCode")
                             val getGuild = inviteObj.javaClass.getMethod("getGuild")
@@ -50,57 +81,50 @@ class ServerApplicationFix : Plugin() {
                             val getId = guildObj.javaClass.getMethod("getId")
                             val guildId = (getId.invoke(guildObj) as? Number)?.toLong()?.toString() ?: return
 
-                            Utils.threadPool.execute {
-                                val formFields = checkVerificationForm(guildId)
-                                if (formFields != null && formFields.length() > 0) {
-                                    param.result = null
-                                    mainHandler.post {
-                                        val manager = Utils.appActivity?.supportFragmentManager
-                                        if (manager != null) {
-                                            val sheet = ServerApplicationSheet(guildId, formFields, inviteCode, this@ServerApplicationFix)
-                                            sheet.show(manager, "ServerApplicationSheet")
+                            // استبدال مستمع النقر الأصلي بمستمع البلوقن
+                            val originalClickListener = getOriginalClickListener(joinButton)
+
+                            joinButton.setOnClickListener { v ->
+                                Utils.threadPool.execute {
+                                    val formFields = checkVerificationForm(guildId)
+                                    if (formFields != null && formFields.length() > 0) {
+                                        mainHandler.post {
+                                            val manager = Utils.appActivity?.supportFragmentManager
+                                            if (manager != null) {
+                                                val sheet = ServerApplicationSheet(guildId, formFields, inviteCode, this@ServerApplicationFix)
+                                                sheet.show(manager, "ServerApplicationSheet")
+                                            }
+                                        }
+                                    } else {
+                                        mainHandler.post {
+                                            originalClickListener?.onClick(v)
                                         }
                                     }
                                 }
                             }
+
                         } catch (e: Exception) {
-                            logger.error("Error intercepting invite button click", e)
+                            logger.error("Error setting custom listener on join button", e)
                         }
                     }
                 })
-            } catch (e: ClassNotFoundException) {
-                // الفئة غير موجودة بهذا الاسم في الإصدار الحالي
-            } catch (e: Exception) {
-                logger.error("Failed to patch $className", e)
             }
+        } catch (e: Exception) {
+            logger.error("Failed to hook WidgetGuildInvite", e)
         }
     }
 
-    private fun extractModelInvite(instance: Any): Any? {
-        val fields = instance.javaClass.declaredFields
-        for (field in fields) {
-            field.isAccessible = true
-            val value = field.get(instance)
-            if (value != null && value.javaClass.name.contains("ModelInvite")) {
-                return value
-            }
+    private fun getOriginalClickListener(view: View): View.OnClickListener? {
+        return try {
+            val getListenerInfo = View::class.java.getDeclaredMethod("getListenerInfo")
+            getListenerInfo.isAccessible = true
+            val listenerInfo = getListenerInfo.invoke(view)
+            val mOnClickListener = listenerInfo.javaClass.getDeclaredField("mOnClickListener")
+            mOnClickListener.isAccessible = true
+            mOnClickListener.get(listenerInfo) as? View.OnClickListener
+        } catch (e: Exception) {
+            null
         }
-
-        // فحص الكلاس الخارجي (this$0) في حال كان Listener كائناً داخلياً
-        try {
-            val outerField = instance.javaClass.getDeclaredField("this$0")
-            outerField.isAccessible = true
-            val outerInstance = outerField.get(instance) ?: return null
-            for (field in outerInstance.javaClass.declaredFields) {
-                field.isAccessible = true
-                val value = field.get(outerInstance)
-                if (value != null && value.javaClass.name.contains("ModelInvite")) {
-                    return value
-                }
-            }
-        } catch (e: Exception) {}
-
-        return null
     }
 
     private fun checkVerificationForm(guildId: String): JSONArray? {
@@ -113,9 +137,7 @@ class ServerApplicationFix : Plugin() {
             if (res.statusCode in 200..299) {
                 val json = JSONObject(res.text())
                 json.optJSONArray("form_fields")
-            } else {
-                null
-            }
+            } else null
         } catch (e: Exception) {
             null
         }
