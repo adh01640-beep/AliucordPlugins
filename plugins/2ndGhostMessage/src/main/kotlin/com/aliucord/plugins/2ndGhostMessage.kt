@@ -2,129 +2,63 @@ package com.aliucord.plugins
 
 import android.app.AlertDialog
 import android.content.Context
-import android.graphics.Color
-import android.view.View
-import android.view.ViewGroup
+import android.os.Handler
+import android.os.Looper
 import android.widget.EditText
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
+import com.aliucord.api.CommandsAPI.CommandResult
 import com.aliucord.entities.Plugin
-import com.aliucord.patcher.after
-import com.aliucord.patcher.component1
-import com.aliucord.patcher.component2
 import com.aliucord.utils.DimenUtils
-import com.discord.stores.StoreStream
+import com.discord.api.commands.ApplicationCommandType
 import com.discord.utilities.rest.RestAPI
-import com.discord.widgets.chat.input.WidgetChatInput
 import org.json.JSONObject
 import java.lang.Exception
 
 @AliucordPlugin(requiresRestart = false)
 class GhostMessage : Plugin() {
 
-    companion object {
-        private const val MAX_CLIMB = 6
-    }
-
-    // Both endpoints need the current user's token in the Authorization header.
-    // RestAPI.AppHeadersProvider is a Java-style singleton on Discord's side, so
-    // the token must be fetched via the explicit getter, not as a Kotlin property.
     private val authToken: String
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun start(context: Context) {
-        // WidgetChatInput.onViewBound(View) fires with the ROOT view of the whole
-        // chat input screen (edit text + attach/emoji/send buttons all included).
-        // NOTE: "WidgetChatInputEditText" is NOT a View subclass - it's a
-        // listener/holder class (implements OnKeyListener/OnEditorActionListener)
-        // that wraps a plain android.widget.EditText. So we search the view tree
-        // for a real EditText instead of that class.
-        patcher.after<WidgetChatInput>("onViewBound", View::class.java) { (_, root: View) ->
-            // Locate the actual EditText inside the fragment's view tree
-            val editText = findEditText(root) ?: run {
-                logger.error("GhostMessage: could not find an EditText in the chat input view tree", null)
-                return@after
+        val arguments = listOf(
+            Utils.createCommandOption(
+                ApplicationCommandType.STRING,
+                "type",
+                "Action type (type 'delete' or 'edit')",
+                null,
+                true
+            )
+        )
+
+        commands.registerCommand(
+            "automessage",
+            "Send a message and instantly delete or edit it",
+            arguments
+        ) { ctx ->
+            val type = ctx.getRequiredString("type").lowercase()
+            val channelId = ctx.channelId
+            val activityContext = Utils.appActivity
+
+            if (activityContext == null) {
+                return@registerCommand CommandResult("Error: App activity not found. Cannot show dialog.", null, false)
             }
 
-            // From the EditText, climb up until we find the row that already
-            // holds more than one child - that's the real icon row (attach,
-            // emoji, send, etc.), since the EditText's direct parent is usually
-            // just a thin auto-grow wrapper.
-            val parentLayout = findIconRow(editText) ?: return@after
-
-            // Avoid adding the button twice if this callback fires more than once
-            if (parentLayout.findViewWithTag<View>("ghost_btn") != null) return@after
-
-            val ghostBtn = ImageButton(context).apply {
-                tag = "ghost_btn"
-                // Built-in Android trash icon, no custom resource needed
-                setImageDrawable(context.getDrawable(android.R.drawable.ic_menu_delete))
-                setBackgroundColor(Color.TRANSPARENT)
-
-                // Size and spacing for the button
-                layoutParams = LinearLayout.LayoutParams(
-                    DimenUtils.dpToPx(40),
-                    DimenUtils.dpToPx(40)
-                ).apply {
-                    setMargins(0, 0, DimenUtils.dpToPx(8), 0)
-                }
-
-                setOnClickListener {
-                    val channelId = StoreStream.getChannelsSelected().id
-                    if (channelId != 0L) {
-                        showModeSelectionDialog(context, channelId)
-                    } else {
-                        Utils.showToast("Cannot determine current channel.")
-                    }
-                }
-            }
-
-            // Add the button at the start of the row, next to the other icons
-            parentLayout.addView(ghostBtn, 0)
-        }
-    }
-
-    // Recursively search the view tree for the real chat input EditText.
-    // A plain android.widget.EditText is used here rather than any
-    // Discord-internal class, since it is guaranteed to be a real View.
-    private fun findEditText(view: View): EditText? {
-        if (view is EditText) return view
-        if (view is ViewGroup) {
-            for (i in 0 until view.childCount) {
-                val found = findEditText(view.getChildAt(i))
-                if (found != null) return found
+            if (type == "delete") {
+                mainHandler.post { showDeleteDialog(activityContext, channelId) }
+                CommandResult("Opening Delete Dialog...", null, false)
+            } else if (type == "edit") {
+                mainHandler.post { showEditDialog(activityContext, channelId) }
+                CommandResult("Opening Edit Dialog...", null, false)
+            } else {
+                CommandResult("Invalid type. Please run the command again and type 'delete' or 'edit'.", null, false)
             }
         }
-        return null
-    }
-
-    // Walk up the view tree from the EditText until a ViewGroup with more than
-    // one child is found (the actual icon row), instead of assuming a fixed depth.
-    private fun findIconRow(start: View): ViewGroup? {
-        var current: View = start
-        repeat(MAX_CLIMB) {
-            val parent = current.parent as? ViewGroup ?: return null
-            if (parent.childCount > 1) return parent
-            current = parent
-        }
-        logger.error("GhostMessage: could not locate the chat input icon row after climbing $MAX_CLIMB levels", null)
-        return null
-    }
-
-    private fun showModeSelectionDialog(context: Context, channelId: Long) {
-        val options = arrayOf("Instant Delete", "Instant Edit")
-        AlertDialog.Builder(context)
-            .setTitle("Ghost Message Mode")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> showDeleteDialog(context, channelId)
-                    1 -> showEditDialog(context, channelId)
-                }
-            }
-            .show()
     }
 
     private fun showDeleteDialog(context: Context, channelId: Long) {
@@ -177,7 +111,6 @@ class GhostMessage : Plugin() {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
                 val body = JSONObject().put("content", text).toString()
 
-                // Send the message
                 val response = Http.Request(url, "POST")
                     .setHeader("Authorization", authToken)
                     .setHeader("Content-Type", "application/json")
@@ -185,7 +118,6 @@ class GhostMessage : Plugin() {
 
                 if (response.statusCode in 200..299) {
                     val msgId = JSONObject(response.text()).getString("id")
-                    // Immediately delete the message using its ID
                     Http.Request("$url/$msgId", "DELETE")
                         .setHeader("Authorization", authToken)
                         .execute()
@@ -204,7 +136,6 @@ class GhostMessage : Plugin() {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
                 val bodyBefore = JSONObject().put("content", before).toString()
 
-                // Send the first (decoy) message
                 val response = Http.Request(url, "POST")
                     .setHeader("Authorization", authToken)
                     .setHeader("Content-Type", "application/json")
@@ -214,7 +145,6 @@ class GhostMessage : Plugin() {
                     val msgId = JSONObject(response.text()).getString("id")
                     val bodyAfter = JSONObject().put("content", after).toString()
 
-                    // Immediately edit it to the real (second) message
                     Http.Request("$url/$msgId", "PATCH")
                         .setHeader("Authorization", authToken)
                         .setHeader("Content-Type", "application/json")
@@ -229,6 +159,6 @@ class GhostMessage : Plugin() {
     }
 
     override fun stop(context: Context) {
-        patcher.unpatchAll()
+        commands.unregisterAll()
     }
 }
