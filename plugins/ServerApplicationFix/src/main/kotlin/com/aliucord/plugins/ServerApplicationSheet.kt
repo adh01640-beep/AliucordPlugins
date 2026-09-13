@@ -12,6 +12,7 @@ import org.json.JSONObject
 
 class ServerApplicationSheet(
     private val guildId: String,
+    private val guildName: String,
     private val formFields: JSONArray,
     private val inviteCode: String,
     private val plugin: ServerApplicationFix
@@ -22,7 +23,7 @@ class ServerApplicationSheet(
         val ctx = view.context
 
         val title = TextView(ctx).apply {
-            text = "Server Application"
+            text = "Application to $guildName"
             textSize = 20f
             setTextColor(Color.WHITE)
             setPadding(0, 0, 0, 40)
@@ -56,7 +57,7 @@ class ServerApplicationSheet(
         val submitBtn = Button(ctx).apply {
             text = "Submit Application"
             setOnClickListener {
-                plugin.submitApplication(guildId, inputs, inviteCode)
+                plugin.submitApplication(guildId, guildName, inputs, inviteCode)
                 dismiss()
             }
         }
