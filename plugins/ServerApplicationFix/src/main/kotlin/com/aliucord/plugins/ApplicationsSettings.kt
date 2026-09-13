@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.TextView
+import com.aliucord.Utils
 import com.aliucord.fragments.SettingsPage
 
 class ApplicationsSettings(private val plugin: ServerApplicationFix) : SettingsPage() {
@@ -36,7 +37,7 @@ class ApplicationsSettings(private val plugin: ServerApplicationFix) : SettingsP
             }
             layout.addView(row)
 
-            plugin.threadPool.execute {
+            Utils.threadPool.execute {
                 val status = plugin.fetchApplicationStatus(guildId)
                 Handler(Looper.getMainLooper()).post {
                     row.text = "$guildName — $status"
