@@ -1,15 +1,11 @@
-plugins {
-    id("com.aliucord.gradle")
-    kotlin("android")
-}
+import com.aliucord.gradle.AliucordExtension
 
-aliucord {
-    author("Adham", 0L)
-    changelog.set(
-        """
-        # v1.0.0
-        - Initial release
-        """.trimIndent()
-    )
-    description.set("Send a message and instantly delete or edit it (ghost message).")
+version = "1.0.0"
+
+description = " ​Send messages that are instantly deleted or edited upon hitting Discord's servers. (use /automessage)"
+
+configure<AliucordExtension> {
+    // TODO: replace 0L with your real Discord user ID if you want the
+    // author name to link to your profile in the plugin list
+    author("Adham", 0L, hyperlink = true)
 }
