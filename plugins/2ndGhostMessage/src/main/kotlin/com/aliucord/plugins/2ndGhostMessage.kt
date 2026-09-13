@@ -78,7 +78,6 @@ class GhostMessage : Plugin() {
             "Automatically delete ALL messages and images you send from now on."
         ) {
             autoDeleteEnabled = true
-            // طرح 60 ثانية لتجنب أي اختلاف زمني بين الهاتف وسيرفر ديسكورد
             val adjustedTime = System.currentTimeMillis() - 60000L
             activationSnowflake = (adjustedTime - 1420070400000L) shl 22
             CommandResult("✅ Auto-delete is ON. New messages & attachments will be deleted.", null, false)
@@ -95,7 +94,10 @@ class GhostMessage : Plugin() {
 
     private fun hookIncomingMessages() {
         val storeMessagesClass = StoreStream.getMessages()::class.java
-        val methods = storeMessagesClass.declaredMethods.filter { it.name == "handleMessageCreate" }
+        // تتبع الإنشاء والتحديث لضمان اصطياد الصور بعد اكتمال الرفع
+        val methods = storeMessagesClass.declaredMethods.filter { 
+            it.name == "handleMessageCreate" || it.name == "handleMessageUpdate" 
+        }
         
         for (method in methods) {
             patcher.patch(method, object : XC_MethodHook() {
@@ -103,47 +105,68 @@ class GhostMessage : Plugin() {
                     if (!autoDeleteEnabled) return
 
                     try {
-                        val message = param.args.firstOrNull() ?: return
-                        val messageClass = message::class.java
+                        val arg = param.args.firstOrNull() ?: return
                         
-                        val getAuthorMethod = messageClass.getMethod("getAuthor")
-                        val author = getAuthorMethod.invoke(message) ?: return
-                        
-                        // تحويل آمن للأرقام كـ String ثم Long لمنع كراش الـ Data Types
-                        val authorIdRaw = author::class.java.getMethod("getId").invoke(author)
-                        val authorId = authorIdRaw.toString().toLongOrNull() ?: return
-                        
-                        val myIdRaw = StoreStream.getUsers().me.id
-                        val myId = myIdRaw.toString().toLongOrNull() ?: return
-                        
-                        if (authorId == myId) {
-                            val msgIdRaw = messageClass.getMethod("getId").invoke(message)
-                            val msgId = msgIdRaw.toString().toLongOrNull() ?: return
+                        // استخراج الرسايل سواء كانت قائمة (List) أو رسالة واحدة
+                        val messages = if (arg is Iterable<*>) arg.toList() else listOf(arg)
+
+                        for (message in messages) {
+                            if (message == null) continue
+                            val messageClass = message::class.java
                             
-                            if (msgId > activationSnowflake) {
-                                val channelIdRaw = messageClass.getMethod("getChannelId").invoke(message)
-                                val channelId = channelIdRaw.toString().toLongOrNull() ?: return
+                            // التأكد إن ده أوبجكت رسالة فعلاً
+                            val getAuthorMethod = try {
+                                messageClass.getMethod("getAuthor")
+                            } catch (e: Exception) { continue }
+                            
+                            val author = getAuthorMethod.invoke(message) ?: continue
+                            
+                            val authorIdRaw = try {
+                                author::class.java.getMethod("getId").invoke(author)
+                            } catch (e: Exception) { continue }
+                            
+                            val authorId = authorIdRaw.toString().toLongOrNull() ?: continue
+                            val myId = StoreStream.getUsers().me.id.toString().toLongOrNull() ?: continue
+                            
+                            if (authorId == myId) {
+                                val msgIdRaw = messageClass.getMethod("getId").invoke(message)
+                                val msgId = msgIdRaw.toString().toLongOrNull() ?: continue
                                 
-                                deleteMessageById(channelId, msgId.toString())
+                                if (msgId > activationSnowflake) {
+                                    val channelIdRaw = messageClass.getMethod("getChannelId").invoke(message)
+                                    val channelId = channelIdRaw.toString().toLongOrNull() ?: continue
+                                    
+                                    // تمرير الطلب لدالة الحذف مع إعطاءها 3 محاولات (Retries)
+                                    deleteMessageById(channelId, msgId.toString(), 3)
+                                }
                             }
                         }
                     } catch (e: Exception) {
-                        // تجاهل الأخطاء الصامتة في الخلفية
+                        // تجاهل الأخطاء العابرة
                     }
                 }
             })
         }
     }
 
-    private fun deleteMessageById(channelId: Long, msgId: String) {
+    // دالة حذف مجهزة بنظام انتظار ومحاولات لتخطي تأخير رفع الصور والمقاطع
+    private fun deleteMessageById(channelId: Long, msgId: String, retries: Int) {
         Utils.threadPool.execute {
             try {
+                Thread.sleep(1500) // انتظار ثانية ونصف لضمان وصول الرسالة للسيرفر
                 val url = "https://discord.com/api/v9/channels/$channelId/messages/$msgId"
-                Http.Request(url, "DELETE")
+                val response = Http.Request(url, "DELETE")
                     .setHeader("Authorization", authToken)
                     .execute()
+
+                // لو السيرفر رفض (مثلاً لسه بتترفع) وعندنا محاولات باقية، نجرب تاني
+                if (response.statusCode !in 200..299 && retries > 0) {
+                    deleteMessageById(channelId, msgId, retries - 1)
+                }
             } catch (e: Exception) {
-                logger.error("AutoDelete Failed", e)
+                if (retries > 0) {
+                    deleteMessageById(channelId, msgId, retries - 1)
+                }
             }
         }
     }
@@ -233,7 +256,6 @@ class GhostMessage : Plugin() {
                         val msgId = JSONObject(responseText).getString("id")
                         val bodyAfter = mapOf("content" to after)
 
-                        // تم التعديل لـ PATCH المباشر
                         Http.Request("$url/$msgId", "PATCH")
                             .setHeader("Authorization", authToken)
                             .executeWithJson(bodyAfter)
@@ -250,3 +272,4 @@ class GhostMessage : Plugin() {
         patcher.unpatchAll()
     }
 }
+
