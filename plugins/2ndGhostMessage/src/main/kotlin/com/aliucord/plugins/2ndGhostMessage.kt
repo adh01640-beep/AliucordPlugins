@@ -26,7 +26,6 @@ class GhostMessage : Plugin() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     
-    // متغيرات التحكم في الحذف التلقائي
     private var autoDeleteEnabled = false
     private var activationSnowflake = 0L
 
@@ -78,7 +77,6 @@ class GhostMessage : Plugin() {
             "Automatically delete ALL messages and images you send from now on."
         ) {
             autoDeleteEnabled = true
-            // إنشاء Snowflake بناءً على الوقت الحالي لمنع حذف الرسائل القديمة عند التمرير
             activationSnowflake = (System.currentTimeMillis() - 1420070400000L) shl 22
             CommandResult("✅ Auto-delete is now ON. Every new message or attachment you send will be deleted immediately.", null, false)
         }
@@ -93,41 +91,39 @@ class GhostMessage : Plugin() {
     }
 
     private fun hookIncomingMessages() {
-        val storeMessagesClass = StoreStream.getMessages().javaClass
+        val storeMessagesClass = StoreStream.getMessages()::class.java
         val methods = storeMessagesClass.declaredMethods.filter { it.name == "handleMessageCreate" }
         
         for (method in methods) {
-            // نستخدم method.parameterTypes لتجنب أي مشاكل في الـ Signatures بين إصدارات ديسكورد
             patcher.after(storeMessagesClass, method.name, method.parameterTypes) { param ->
                 if (!autoDeleteEnabled) return@after
 
                 try {
                     val message = param.args.firstOrNull() ?: return@after
+                    val messageClass = message::class.java
                     
-                    // استخدام الـ Reflection لضمان الوصول للخصائص بغض النظر عن نوع كلاس الرسالة
-                    val getAuthorMethod = message.javaClass.getMethod("getAuthor")
+                    val getAuthorMethod = messageClass.getMethod("getAuthor")
                     val author = getAuthorMethod.invoke(message) ?: return@after
+                    val authorClass = author::class.java
                     
-                    val getAuthorIdMethod = author.javaClass.getMethod("getId")
+                    val getAuthorIdMethod = authorClass.getMethod("getId")
                     val authorId = getAuthorIdMethod.invoke(author) as? Long ?: return@after
                     
                     val myId = StoreStream.getUsers().me.id
                     
-                    // إذا كانت الرسالة مرسلة من حسابك أنت
                     if (authorId == myId) {
-                        val getIdMethod = message.javaClass.getMethod("getId")
+                        val getIdMethod = messageClass.getMethod("getId")
                         val msgId = getIdMethod.invoke(message) as? Long ?: return@after
                         
-                        // نتحقق أن الرسالة جديدة (تم إرسالها بعد تفعيل الأمر) وليس رسالة قديمة يتم تحميلها
                         if (msgId > activationSnowflake) {
-                            val getChannelIdMethod = message.javaClass.getMethod("getChannelId")
+                            val getChannelIdMethod = messageClass.getMethod("getChannelId")
                             val channelId = getChannelIdMethod.invoke(message) as? Long ?: return@after
                             
                             deleteMessageById(channelId, msgId.toString())
                         }
                     }
                 } catch (e: Exception) {
-                    // تجاهل الأخطاء الصامتة الناتجة عن أنواع مختلفة من الحزم
+                    // Ignore silent background exceptions
                 }
             }
         }
@@ -242,4 +238,3 @@ class GhostMessage : Plugin() {
         patcher.unpatchAll()
     }
 }
-
