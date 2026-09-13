@@ -12,6 +12,9 @@ import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
+import com.aliucord.patcher.after
+import com.aliucord.patcher.component1
+import com.aliucord.patcher.component2
 import com.aliucord.utils.DimenUtils
 import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
@@ -22,11 +25,15 @@ import java.lang.Exception
 @AliucordPlugin(requiresRestart = false)
 class GhostMessage : Plugin() {
 
+    // Both endpoints need the current user's token in the Authorization header.
+    // RestAPI.AppHeadersProvider is a Java-style singleton on Discord's side, so
+    // the token must be fetched via the explicit getter, not as a Kotlin property.
+    private val authToken: String
+        get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
+
     override fun start(context: Context) {
         // Inject a button into the chat input box
-        patcher.after(WidgetChatInputEditText::class.java, "onViewBound", View::class.java) { param ->
-            val view = param.args[0] as View
-
+        patcher.after<WidgetChatInputEditText>("onViewBound", View::class.java) { (_, view: View) ->
             // Grab the parent container that holds the input field and side buttons
             val parentLayout = view.parent as? ViewGroup ?: return@after
 
@@ -127,7 +134,7 @@ class GhostMessage : Plugin() {
 
                 // Send the message
                 val response = Http.Request(url, "POST")
-                    .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
+                    .setHeader("Authorization", authToken)
                     .setHeader("Content-Type", "application/json")
                     .executeWithJson(body)
 
@@ -135,7 +142,7 @@ class GhostMessage : Plugin() {
                     val msgId = JSONObject(response.text()).getString("id")
                     // Immediately delete the message using its ID
                     Http.Request("$url/$msgId", "DELETE")
-                        .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
+                        .setHeader("Authorization", authToken)
                         .execute()
                 } else {
                     logger.error("Failed to send message for Ghost Delete: ${response.statusCode}", null)
@@ -154,7 +161,7 @@ class GhostMessage : Plugin() {
 
                 // Send the first (decoy) message
                 val response = Http.Request(url, "POST")
-                    .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
+                    .setHeader("Authorization", authToken)
                     .setHeader("Content-Type", "application/json")
                     .executeWithJson(bodyBefore)
 
@@ -164,7 +171,7 @@ class GhostMessage : Plugin() {
 
                     // Immediately edit it to the real (second) message
                     Http.Request("$url/$msgId", "PATCH")
-                        .setHeader("Authorization", RestAPI.AppHeadersProvider.authToken)
+                        .setHeader("Authorization", authToken)
                         .setHeader("Content-Type", "application/json")
                         .executeWithJson(bodyAfter)
                 } else {
