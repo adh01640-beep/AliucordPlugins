@@ -3,7 +3,6 @@ package com.aliucord.plugins
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.view.View
 import android.widget.EditText
 import com.aliucord.Http
 import com.aliucord.Utils
@@ -13,6 +12,8 @@ import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
+import rx.Observable
+import java.util.concurrent.atomic.AtomicBoolean
 
 @AliucordPlugin(requiresRestart = false)
 class ServerApplicationFix : Plugin() {
@@ -21,57 +22,22 @@ class ServerApplicationFix : Plugin() {
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val isBypassing = AtomicBoolean(false)
 
     override fun start(context: Context) {
-        hookInviteSheet()
-    }
-
-    private fun hookInviteSheet() {
         try {
-            val widgetGuildInviteClass = Class.forName("com.discord.widgets.guilds.invite.WidgetGuildInvite")
-            
-            // هوك على دالة تهيئة الواجهة بعد جلب بيانات الدعوة
-            val targetMethods = widgetGuildInviteClass.declaredMethods.filter { 
-                it.name == "configureLoadedUI" || it.name == "configureUI" 
+            val restAPI = Class.forName("com.discord.utilities.rest.RestAPI")
+            val postInviteCode = restAPI.declaredMethods.find { 
+                it.name == "postInviteCode" && it.parameterTypes.size == 3 
             }
 
-            for (method in targetMethods) {
-                patcher.patch(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
+            if (postInviteCode != null) {
+                patcher.patch(postInviteCode, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (isBypassing.get()) return
+
                         try {
-                            val widgetInstance = param.thisObject
-                            
-                            // استخراج الزر f2424b من getBinding()
-                            val getBindingMethod = widgetInstance.javaClass.getMethod("getBinding")
-                            val bindingObj = getBindingMethod.invoke(widgetInstance) ?: return
-                            
-                            val btnField = bindingObj.javaClass.getDeclaredField("b")
-                            btnField.isAccessible = true
-                            val joinButton = btnField.get(bindingObj) as? View ?: return
-
-                            // استخراج كائن ModelInvite الممرر للدالة أو المخزن في الـ Widget
-                            var inviteObj: Any? = null
-                            for (arg in param.args) {
-                                if (arg != null && arg.javaClass.name.contains("ModelInvite")) {
-                                    inviteObj = arg
-                                    break
-                                }
-                            }
-
-                            if (inviteObj == null) {
-                                // محاولة إيجاده داخل حقول الـ Widget
-                                for (f in widgetInstance.javaClass.declaredFields) {
-                                    f.isAccessible = true
-                                    val v = f.get(widgetInstance)
-                                    if (v != null && v.javaClass.name.contains("ModelInvite")) {
-                                        inviteObj = v
-                                        break
-                                    }
-                                }
-                            }
-
-                            if (inviteObj == null) return
-
+                            val inviteObj = param.args[0] ?: return
                             val getCode = inviteObj.javaClass.getMethod("getCode")
                             val getGuild = inviteObj.javaClass.getMethod("getGuild")
 
@@ -81,66 +47,55 @@ class ServerApplicationFix : Plugin() {
                             val getId = guildObj.javaClass.getMethod("getId")
                             val guildId = (getId.invoke(guildObj) as? Number)?.toLong()?.toString() ?: return
 
-                            // استبدال مستمع النقر الأصلي بمستمع البلوقن
-                            val originalClickListener = getOriginalClickListener(joinButton)
-
-                            joinButton.setOnClickListener { v ->
+                            param.result = Observable.create<Any> { subscriber ->
                                 Utils.threadPool.execute {
-                                    val formFields = checkVerificationForm(guildId)
-                                    if (formFields != null && formFields.length() > 0) {
-                                        mainHandler.post {
-                                            val manager = Utils.appActivity?.supportFragmentManager
-                                            if (manager != null) {
-                                                val sheet = ServerApplicationSheet(guildId, formFields, inviteCode, this@ServerApplicationFix)
-                                                sheet.show(manager, "ServerApplicationSheet")
+                                    try {
+                                        val url = "https://discord.com/api/v9/guilds/$guildId/member-verification"
+                                        val res = Http.Request(url, "GET")
+                                            .setHeader("Authorization", authToken)
+                                            .execute()
+
+                                        if (res.statusCode in 200..299) {
+                                            val json = JSONObject(res.text())
+                                            val formFields = json.optJSONArray("form_fields")
+
+                                            if (formFields != null && formFields.length() > 0) {
+                                                mainHandler.post {
+                                                    val manager = Utils.appActivity?.supportFragmentManager
+                                                    if (manager != null) {
+                                                        val sheet = ServerApplicationSheet(guildId, formFields, inviteCode, this@ServerApplicationFix)
+                                                        sheet.show(manager, "ServerApplicationSheet")
+                                                    }
+                                                }
+                                                subscriber.onError(Exception("Requires Application"))
+                                                return@execute
                                             }
                                         }
-                                    } else {
-                                        mainHandler.post {
-                                            originalClickListener?.onClick(v)
+
+                                        isBypassing.set(true)
+                                        try {
+                                            val origObs = param.method.invoke(param.thisObject, *param.args) as Observable<Any>
+                                            origObs.subscribe(
+                                                { result -> subscriber.onNext(result) },
+                                                { error -> subscriber.onError(error) },
+                                                { subscriber.onCompleted() }
+                                            )
+                                        } catch (e: Exception) {
+                                            subscriber.onError(e)
+                                        } finally {
+                                            isBypassing.set(false)
                                         }
+
+                                    } catch (e: Exception) {
+                                        subscriber.onError(e)
                                     }
                                 }
                             }
-
-                        } catch (e: Exception) {
-                            logger.error("Error setting custom listener on join button", e)
-                        }
+                        } catch (e: Exception) {}
                     }
                 })
             }
-        } catch (e: Exception) {
-            logger.error("Failed to hook WidgetGuildInvite", e)
-        }
-    }
-
-    private fun getOriginalClickListener(view: View): View.OnClickListener? {
-        return try {
-            val getListenerInfo = View::class.java.getDeclaredMethod("getListenerInfo")
-            getListenerInfo.isAccessible = true
-            val listenerInfo = getListenerInfo.invoke(view)
-            val mOnClickListener = listenerInfo.javaClass.getDeclaredField("mOnClickListener")
-            mOnClickListener.isAccessible = true
-            mOnClickListener.get(listenerInfo) as? View.OnClickListener
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun checkVerificationForm(guildId: String): JSONArray? {
-        return try {
-            val url = "https://discord.com/api/v9/guilds/$guildId/member-verification"
-            val res = Http.Request(url, "GET")
-                .setHeader("Authorization", authToken)
-                .execute()
-
-            if (res.statusCode in 200..299) {
-                val json = JSONObject(res.text())
-                json.optJSONArray("form_fields")
-            } else null
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) {}
     }
 
     fun submitApplication(guildId: String, inputs: List<Pair<JSONObject, EditText>>, inviteCode: String) {
@@ -170,9 +125,7 @@ class ServerApplicationFix : Plugin() {
                 if (res.statusCode in 200..299) {
                     joinGuildDirect(inviteCode)
                 }
-            } catch (e: Exception) {
-                logger.error("Failed to submit application", e)
-            }
+            } catch (e: Exception) {}
         }
     }
 
@@ -183,9 +136,7 @@ class ServerApplicationFix : Plugin() {
                 Http.Request(joinUrl, "POST")
                     .setHeader("Authorization", authToken)
                     .execute()
-            } catch (e: Exception) {
-                logger.error("Failed to join invite", e)
-            }
+            } catch (e: Exception) {}
         }
     }
 
