@@ -2,18 +2,17 @@ package com.aliucord.plugins
 
 import android.app.AlertDialog
 import android.content.Context
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
+import androidx.core.widget.doAfterTextChanged
 import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI.CommandResult
-import com.aliucord.api.SettingsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.DimenUtils
@@ -189,7 +188,7 @@ class GhostMessage : Plugin() {
         commands.unregisterAll()
     }
 
-    class PluginSettings(private val settings: SettingsAPI) : SettingsPage() {
+    class PluginSettings : SettingsPage() {
         override fun onViewBound(view: View) {
             super.onViewBound(view)
             setPadding(0)
@@ -199,22 +198,18 @@ class GhostMessage : Plugin() {
             val deleteInput = TextInput(ctx, "Delete Delay (ms)").apply {
                 editText.inputType = InputType.TYPE_CLASS_NUMBER
                 editText.setText(settings.getLong("delete_delay", 500L).toString())
-                editText.setOnFocusChangeListener { _, hasFocus ->
-                    if (!hasFocus) {
-                        val value = editText.text.toString().toLongOrNull() ?: 500L
-                        settings.setLong("delete_delay", value)
-                    }
+                editText.doAfterTextChanged {
+                    val value = it?.toString()?.toLongOrNull() ?: 500L
+                    settings.setLong("delete_delay", value)
                 }
             }
 
             val editInput = TextInput(ctx, "Edit Delay (ms)").apply {
                 editText.inputType = InputType.TYPE_CLASS_NUMBER
                 editText.setText(settings.getLong("edit_delay", 600L).toString())
-                editText.setOnFocusChangeListener { _, hasFocus ->
-                    if (!hasFocus) {
-                        val value = editText.text.toString().toLongOrNull() ?: 600L
-                        settings.setLong("edit_delay", value)
-                    }
+                editText.doAfterTextChanged {
+                    val value = it?.toString()?.toLongOrNull() ?: 600L
+                    settings.setLong("edit_delay", value)
                 }
             }
 
