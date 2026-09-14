@@ -2,16 +2,22 @@ package com.aliucord.plugins
 
 import android.app.AlertDialog
 import android.content.Context
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.InputType
+import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI.CommandResult
+import com.aliucord.api.SettingsAPI
 import com.aliucord.entities.Plugin
+import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.DimenUtils
+import com.aliucord.views.TextInput
 import com.discord.api.commands.ApplicationCommandType
 import com.discord.utilities.rest.RestAPI
 import org.json.JSONObject
@@ -24,6 +30,16 @@ class GhostMessage : Plugin() {
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val deleteDelay: Long
+        get() = settings.getLong("delete_delay", 500L)
+
+    private val editDelay: Long
+        get() = settings.getLong("edit_delay", 600L)
+
+    init {
+        settingsTab = SettingsTab(PluginSettings::class.java, SettingsTab.Type.PAGE)
+    }
 
     override fun start(context: Context) {
         val arguments = listOf(
@@ -46,7 +62,6 @@ class GhostMessage : Plugin() {
 
             mainHandler.post {
                 val activity = Utils.appActivity
-                
                 if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
                     if (type == "delete") {
                         showDeleteDialog(activity, channelId)
@@ -125,9 +140,7 @@ class GhostMessage : Plugin() {
                     val responseText = response.text()
                     if (!responseText.isNullOrEmpty()) {
                         val msgId = JSONObject(responseText).getString("id")
-                        
-                        // delay
-                        Thread.sleep(500)
+                        Thread.sleep(deleteDelay)
 
                         Http.Request("$url/$msgId", "DELETE")
                             .setHeader("Authorization", authToken)
@@ -136,7 +149,7 @@ class GhostMessage : Plugin() {
                     }
                 }
             } catch (e: Exception) {
-                logger.error("error in Ghost Delete", e)
+                logger.error("Error in Ghost Delete", e)
             }
         }
     }
@@ -158,8 +171,7 @@ class GhostMessage : Plugin() {
                         val msgId = JSONObject(responseText).getString("id")
                         val bodyAfter = mapOf("content" to after)
 
-                        // delay
-                        Thread.sleep(600)
+                        Thread.sleep(editDelay)
 
                         Http.Request("$url/$msgId", "PATCH")
                             .setHeader("Authorization", authToken)
@@ -175,5 +187,39 @@ class GhostMessage : Plugin() {
 
     override fun stop(context: Context) {
         commands.unregisterAll()
+    }
+
+    class PluginSettings(private val settings: SettingsAPI) : SettingsPage() {
+        override fun onViewBound(view: View) {
+            super.onViewBound(view)
+            setPadding(0)
+
+            val ctx = view.context
+
+            val deleteInput = TextInput(ctx, "Delete Delay (ms)").apply {
+                editText.inputType = InputType.TYPE_CLASS_NUMBER
+                editText.setText(settings.getLong("delete_delay", 500L).toString())
+                editText.setOnFocusChangeListener { _, hasFocus ->
+                    if (!hasFocus) {
+                        val value = editText.text.toString().toLongOrNull() ?: 500L
+                        settings.setLong("delete_delay", value)
+                    }
+                }
+            }
+
+            val editInput = TextInput(ctx, "Edit Delay (ms)").apply {
+                editText.inputType = InputType.TYPE_CLASS_NUMBER
+                editText.setText(settings.getLong("edit_delay", 600L).toString())
+                editText.setOnFocusChangeListener { _, hasFocus ->
+                    if (!hasFocus) {
+                        val value = editText.text.toString().toLongOrNull() ?: 600L
+                        settings.setLong("edit_delay", value)
+                    }
+                }
+            }
+
+            addView(deleteInput)
+            addView(editInput)
+        }
     }
 }
