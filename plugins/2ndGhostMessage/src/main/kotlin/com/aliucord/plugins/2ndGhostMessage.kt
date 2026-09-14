@@ -20,7 +20,6 @@ import java.lang.Exception
 @AliucordPlugin(requiresRestart = false)
 class GhostMessage : Plugin() {
 
-    // user authtoken it will be used on message edit/delete/send
     private val authToken: String
         get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
 
@@ -44,20 +43,25 @@ class GhostMessage : Plugin() {
         ) { ctx ->
             val type = ctx.getRequiredString("type").lowercase()
             val channelId = ctx.channelId
-            val activityContext = Utils.appActivity
 
-            if (activityContext == null) {
-                return@registerCommand CommandResult("Error: App activity not found.", null, false)
+            mainHandler.post {
+                val activity = Utils.appActivity
+                
+                if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
+                    if (type == "delete") {
+                        showDeleteDialog(activity, channelId)
+                    } else if (type == "edit") {
+                        showEditDialog(activity, channelId)
+                    }
+                } else {
+                    Utils.showToast("Activity is not available, please try again.")
+                }
             }
 
-            if (type == "delete") {
-                mainHandler.post { showDeleteDialog(activityContext, channelId) }
-                CommandResult("working (:", null, false)
-            } else if (type == "edit") {
-                mainHandler.post { showEditDialog(activityContext, channelId) }
-                CommandResult("working (:", null, false)
+            if (type == "delete" || type == "edit") {
+                CommandResult(null, null, false)
             } else {
-                CommandResult("invalid type please write 'delete' or 'edit'.", null, false)
+                CommandResult("Invalid type. Please choose 'delete' or 'edit'.", null, false)
             }
         }
     }
@@ -112,22 +116,27 @@ class GhostMessage : Plugin() {
                 val url = "https://discord.com/api/v9/channels/$channelId/messages"
                 val body = mapOf("content" to text)
 
-                // send it then wipe it right away
                 val response = Http.Request(url, "POST")
                     .setHeader("Authorization", authToken)
+                    .setHeader("Content-Type", "application/json")
                     .executeWithJson(body)
 
                 if (response.statusCode in 200..299) {
                     val responseText = response.text()
                     if (!responseText.isNullOrEmpty()) {
                         val msgId = JSONObject(responseText).getString("id")
+                        
+                        // delay
+                        Thread.sleep(500)
+
                         Http.Request("$url/$msgId", "DELETE")
                             .setHeader("Authorization", authToken)
+                            .setHeader("Content-Type", "application/json")
                             .execute()
                     }
                 }
             } catch (e: Exception) {
-                logger.error("Error in Ghost Delete", e)
+                logger.error("error in Ghost Delete", e)
             }
         }
     }
@@ -140,6 +149,7 @@ class GhostMessage : Plugin() {
 
                 val response = Http.Request(url, "POST")
                     .setHeader("Authorization", authToken)
+                    .setHeader("Content-Type", "application/json")
                     .executeWithJson(bodyBefore)
 
                 if (response.statusCode in 200..299) {
@@ -148,9 +158,12 @@ class GhostMessage : Plugin() {
                         val msgId = JSONObject(responseText).getString("id")
                         val bodyAfter = mapOf("content" to after)
 
-                        // patch it quick
+                        // delay
+                        Thread.sleep(600)
+
                         Http.Request("$url/$msgId", "PATCH")
                             .setHeader("Authorization", authToken)
+                            .setHeader("Content-Type", "application/json")
                             .executeWithJson(bodyAfter)
                     }
                 }
@@ -164,4 +177,3 @@ class GhostMessage : Plugin() {
         commands.unregisterAll()
     }
 }
-
