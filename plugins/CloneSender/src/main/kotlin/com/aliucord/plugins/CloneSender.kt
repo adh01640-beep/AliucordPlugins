@@ -11,6 +11,7 @@ import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.Collections
 import java.util.HashSet
 
@@ -54,7 +55,8 @@ class CloneSender : Plugin() {
     private fun processIncomingMessage(msg: Message) {
         val rawContent = msg.content ?: return
         val content = rawContent.trim()
-        val authorId = msg.author?.id?.toString() ?: return
+        val author = msg.author ?: return
+        val authorId = author.id.toString()
         val channelId = msg.channelId.toString()
         val messageId = msg.id.toString()
 
@@ -71,7 +73,8 @@ class CloneSender : Plugin() {
         val isAllowed = isOwner || allowedUsers.contains(authorId)
 
         if (content.startsWith("+سماح ") && isOwner) {
-            val target = extractIdFromToken(content.removePrefix("+سماح ").trim().split("\\s+".toRegex())[0])
+            val targetStr = content.removePrefix("+سماح ").trim().split(Regex("\\s+"))[0]
+            val target = extractIdFromToken(targetStr)
             if (target != null) {
                 allowedUsers.add(target)
                 deleteMessage(channelId, messageId)
@@ -81,7 +84,8 @@ class CloneSender : Plugin() {
         }
 
         if (content.startsWith("+الغاء ") && isOwner) {
-            val target = extractIdFromToken(content.removePrefix("+الغاء ").trim().split("\\s+".toRegex())[0])
+            val targetStr = content.removePrefix("+الغاء ").trim().split(Regex("\\s+"))[0]
+            val target = extractIdFromToken(targetStr)
             if (target != null) {
                 allowedUsers.remove(target)
                 deleteMessage(channelId, messageId)
@@ -92,7 +96,7 @@ class CloneSender : Plugin() {
 
         if (content.startsWith("+رسالة ") && isAllowed) {
             val remainder = content.removePrefix("+رسالة ").trim()
-            val parts = remainder.split("\\s+".toRegex(), limit = 2)
+            val parts = remainder.split(Regex("\\s+"), 2)
             if (parts.size < 2) return
 
             val targetId = extractIdFromToken(parts[0]) ?: return
@@ -105,12 +109,11 @@ class CloneSender : Plugin() {
 
     private fun extractIdFromToken(token: String): String? {
         val trimmed = token.trim()
-        val mentionRegex = "^<@!?([0-9]+)>$".toRegex()
-        val match = mentionRegex.find(trimmed)
+        val match = Regex("^<@!?([0-9]+)>$").find(trimmed)
         if (match != null) {
             return match.groupValues[1]
         }
-        if (trimmed.matches("^[0-9]+$".toRegex())) {
+        if (trimmed.matches(Regex("^[0-9]+$"))) {
             return trimmed
         }
         return null
@@ -195,7 +198,14 @@ class CloneSender : Plugin() {
                     try {
                         val imgRes = Http.Request(avatarUrl, "GET").execute()
                         if (imgRes.ok()) {
-                            val imgBytes = imgRes.data()
+                            val stream = imgRes.stream()
+                            val buffer = ByteArrayOutputStream()
+                            val data = ByteArray(4096)
+                            var nRead: Int
+                            while (stream.read(data, 0, data.size).also { nRead = it } != -1) {
+                                buffer.write(data, 0, nRead)
+                            }
+                            val imgBytes = buffer.toByteArray()
                             val base64Img = "data:image/png;base64," + Base64.encodeToString(imgBytes, Base64.NO_WRAP)
 
                             val avatarBody = JSONObject().apply {
