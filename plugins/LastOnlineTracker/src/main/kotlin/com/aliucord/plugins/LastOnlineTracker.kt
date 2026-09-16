@@ -107,11 +107,14 @@ class LastOnlineTracker : Plugin() {
 
         // Continuously track presence changes for every user, not just ones whose
         // profile is currently open, so data is ready the moment it's needed.
+        // NOTE: RxUtils.subscribe takes an extension lambda (T.() -> Unit), so the
+        // receiver is accessed via `this`, not a named parameter.
         try {
-            StoreStream.getPresences().observeAllPresences().subscribe { map ->
+            StoreStream.getPresences().observeAllPresences().subscribe {
+                val map: Map<Long, Presence> = this
                 val now = System.currentTimeMillis()
 
-                for ((userId, presence) in map as Map<Long, Presence>) {
+                for ((userId, presence) in map) {
                     val status = presence.status
                     lastKnownStatus[userId] = status
 
@@ -158,8 +161,7 @@ class LastOnlineTracker : Plugin() {
         }
 
         // Inject the "Last Online:" row right after the About Me card, inside the
-        // sheet's main content container - matches where BetterUserDetails places
-        // its own rows, confirmed from its real source.
+        // sheet's main content container.
         patcher.after<WidgetUserSheet>(
             "configureNote",
             WidgetUserSheetViewModel.ViewState.Loaded::class.java,
