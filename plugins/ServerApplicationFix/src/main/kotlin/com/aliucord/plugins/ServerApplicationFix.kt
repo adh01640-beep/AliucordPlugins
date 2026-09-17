@@ -25,7 +25,7 @@ class ServerApplicationFix : Plugin() {
     }
 
     private val authToken: String
-        get() = RestAPI.AppHeadersProvider.INSTANCE.getAuthToken()
+        get() = RestAPI.AppHeadersProvider.INSTANCE.authToken
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isBypassing = AtomicBoolean(false)
@@ -36,7 +36,7 @@ class ServerApplicationFix : Plugin() {
             if (method.name == "call") onSubscribe(args[0])
             null
         }
-        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)
+        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)!!
     }
 
     private fun subscriberOnNext(subscriber: Any, value: Any?) {
@@ -87,7 +87,7 @@ class ServerApplicationFix : Plugin() {
                 origObs,
                 onNext = { result -> subscriberOnNext(subscriber, result) },
                 onError = { error -> subscriberOnError(subscriber, error) },
-                onCompleted = { subscriberOnCompleted(subscriber) },
+                onCompleted = { subscriberOnCompleted(subscriber) }
             )
         } catch (e: Exception) {
             subscriberOnError(subscriber, e)
@@ -107,9 +107,9 @@ class ServerApplicationFix : Plugin() {
                 Long::class.javaPrimitiveType,
                 Boolean::class.javaPrimitiveType,
                 String::class.java,
-                Long::class.java,
+                java.lang.Long::class.java,
                 RestAPIParams.InviteCode::class.java,
-                String::class.java,
+                String::class.java
             )
 
             patcher.patch(joinGuild, object : XC_MethodHook() {
@@ -133,7 +133,6 @@ class ServerApplicationFix : Plugin() {
 
                                         if (formFields != null && formFields.length() > 0) {
                                             val guildName = fetchGuildName(guildId)
-
                                             mainHandler.post {
                                                 val manager = Utils.appActivity?.supportFragmentManager
                                                 if (manager != null) {
@@ -143,23 +142,27 @@ class ServerApplicationFix : Plugin() {
                                                         formFields,
                                                         param,
                                                         subscriber,
-                                                        this@ServerApplicationFix,
+                                                        this@ServerApplicationFix
                                                     )
                                                     sheet.show(manager, "ServerApplicationSheet")
+                                                } else {
+                                                    failJoin(subscriber, "Failed to open the application interface")
                                                 }
                                             }
                                             return@execute
                                         }
                                     }
-
                                     triggerOriginalJoin(param, subscriber)
 
                                 } catch (e: Exception) {
-                                    subscriberOnError(subscriber, e)
+                                    logger.error("Verification check failed, falling back to native join", e)
+                                    triggerOriginalJoin(param, subscriber)
                                 }
                             }
                         }
-                    } catch (e: Exception) {}
+                    } catch (e: Exception) {
+                        logger.error("Hook error", e)
+                    }
                 }
             })
         } catch (e: Exception) {
@@ -172,7 +175,7 @@ class ServerApplicationFix : Plugin() {
             val res = Http.Request("https://discord.com/api/v9/guilds/$guildId/preview", "GET")
                 .setHeader("Authorization", authToken)
                 .execute()
-            if (res.ok()) JSONObject(res.text()).optString("name", "Unknown Server") else "Unknown Server"
+            if (res.statusCode in 200..299) JSONObject(res.text()).optString("name", "Unknown Server") else "Unknown Server"
         } catch (e: Exception) {
             "Unknown Server"
         }
@@ -183,7 +186,7 @@ class ServerApplicationFix : Plugin() {
         guildName: String,
         inputs: List<Pair<JSONObject, EditText>>,
         param: XC_MethodHook.MethodHookParam,
-        subscriber: Any,
+        subscriber: Any
     ) {
         Utils.threadPool.execute {
             try {
@@ -203,24 +206,30 @@ class ServerApplicationFix : Plugin() {
                 }
 
                 val url = "https://discord.com/api/v9/guilds/$guildId/requests/@me"
-                val res = Http.Request(url, "POST")
+                
+                var res = Http.Request(url, "PUT")
                     .setHeader("Authorization", authToken)
                     .setHeader("Content-Type", "application/json")
                     .executeWithJson(body)
 
+                if (res.statusCode !in 200..299) {
+                    res = Http.Request(url, "POST")
+                        .setHeader("Authorization", authToken)
+                        .setHeader("Content-Type", "application/json")
+                        .executeWithJson(body)
+                }
+
                 if (res.statusCode in 200..299) {
                     trackApplication(guildId, guildName)
-                    triggerOriginalJoin(param, subscriber)
+                    failJoin(subscriber, "Application Submitted successfully to $guildName. Check settings for approval status.")
                 } else {
-                    failJoin(subscriber, "Application submission failed")
+                    failJoin(subscriber, "Application submission failed: HTTP ${res.statusCode}")
                 }
             } catch (e: Exception) {
                 failJoin(subscriber, e.message ?: "Unknown error")
             }
         }
     }
-
-    // --- Application tracking (for the settings page) ---
 
     private fun trackApplication(guildId: String, guildName: String) {
         try {
