@@ -13,6 +13,7 @@ import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
+import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -80,7 +81,8 @@ class ServerApplicationFix : Plugin() {
     fun triggerOriginalJoin(param: XC_MethodHook.MethodHookParam, subscriber: Any) {
         isBypassing.set(true)
         try {
-            val origObs = param.method.invoke(param.thisObject, *param.args)!!
+            val method = param.method as Method
+            val origObs = method.invoke(param.thisObject, *param.args)!!
             subscribeToObservable(
                 origObs,
                 onNext = { result -> subscriberOnNext(subscriber, result) },
