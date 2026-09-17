@@ -8,10 +8,13 @@ import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
+import com.discord.restapi.RestAPIParams
+import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 import java.util.concurrent.atomic.AtomicBoolean
 
 @AliucordPlugin(requiresRestart = false)
@@ -22,79 +25,150 @@ class ServerApplicationFix : Plugin() {
     }
 
     private val authToken: String
-        get() = com.discord.utilities.rest.RestAPI.AppHeadersProvider.INSTANCE.authToken
+        get() = RestAPI.AppHeadersProvider.INSTANCE.authToken
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isBypassing = AtomicBoolean(false)
 
-    override fun start(context: Context) {
-        try {
-            val joinGuildMethod = Class.forName("com.discord.widgets.guilds.join.GuildJoinHelperKt")
-                .declaredMethods.firstOrNull { it.name == "joinGuild" }
-
-            if (joinGuildMethod != null) {
-                patcher.patch(joinGuildMethod, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (isBypassing.get()) return
-
-                        val guildId = param.args[1] as? Long ?: return
-                        param.result = null
-
-                        Utils.threadPool.execute {
-                            try {
-                                val url = "https://discord.com/api/v9/guilds/$guildId/member-verification?with_guild=false"
-                                val res = Http.Request(url, "GET")
-                                    .setHeader("Authorization", authToken)
-                                    .execute()
-
-                                if (res.statusCode in 200..299) {
-                                    val json = JSONObject(res.text())
-                                    val formFields = json.optJSONArray("form_fields")
-
-                                    if (formFields != null && formFields.length() > 0) {
-                                        val guildName = fetchGuildName(guildId)
-                                        mainHandler.post {
-                                            val manager = Utils.appActivity?.supportFragmentManager
-                                            if (manager != null) {
-                                                val sheet = ServerApplicationSheet(
-                                                    guildId.toString(),
-                                                    guildName,
-                                                    formFields,
-                                                    this@ServerApplicationFix
-                                                )
-                                                sheet.show(manager, "ServerApplicationSheet")
-                                            } else {
-                                                Utils.showToast("Cannot open application form")
-                                            }
-                                        }
-                                        return@execute
-                                    }
-                                }
-
-                                mainHandler.post {
-                                    triggerOriginalJoin(param)
-                                }
-                            } catch (e: Exception) {
-                                mainHandler.post {
-                                    triggerOriginalJoin(param)
-                                }
-                            }
-                        }
-                    }
-                })
-            }
-        } catch (e: Exception) {
+    private fun createObservable(onSubscribe: (Any) -> Unit): Any {
+        val onSubscribeClass = Class.forName("rx.Observable\$OnSubscribe")
+        val proxy = Proxy.newProxyInstance(onSubscribeClass.classLoader, arrayOf(onSubscribeClass)) { _, method, args ->
+            if (method.name == "call") onSubscribe(args[0])
+            null
         }
+        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)!!
     }
 
-    private fun triggerOriginalJoin(param: XC_MethodHook.MethodHookParam) {
+    private fun subscriberOnNext(subscriber: Any, value: Any?) {
+        try {
+            subscriber.javaClass.getMethod("onNext", Any::class.java).invoke(subscriber, value)
+        } catch (e: Exception) {}
+    }
+
+    private fun subscriberOnError(subscriber: Any, error: Throwable) {
+        try {
+            subscriber.javaClass.getMethod("onError", Throwable::class.java).invoke(subscriber, error)
+        } catch (e: Exception) {}
+    }
+
+    private fun subscriberOnCompleted(subscriber: Any) {
+        try {
+            subscriber.javaClass.getMethod("onCompleted").invoke(subscriber)
+        } catch (e: Exception) {}
+    }
+
+    private fun subscribeToObservable(
+        observable: Any,
+        onNext: (Any?) -> Unit,
+        onError: (Throwable) -> Unit,
+        onCompleted: () -> Unit
+    ) {
+        try {
+            val action1Class = Class.forName("rx.functions.Action1")
+            val action0Class = Class.forName("rx.functions.Action0")
+
+            val onNextProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
+                if (method.name == "call") onNext(args?.getOrNull(0))
+                null
+            }
+            val onErrorProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
+                if (method.name == "call") onError(args?.get(0) as Throwable)
+                null
+            }
+            val onCompletedProxy = Proxy.newProxyInstance(action0Class.classLoader, arrayOf(action0Class)) { _, method, _ ->
+                if (method.name == "call") onCompleted()
+                null
+            }
+
+            observable.javaClass
+                .getMethod("subscribe", action1Class, action1Class, action0Class)
+                .invoke(observable, onNextProxy, onErrorProxy, onCompletedProxy)
+        } catch (e: Exception) {}
+    }
+
+    private fun triggerOriginalJoin(param: XC_MethodHook.MethodHookParam, subscriber: Any) {
         isBypassing.set(true)
         try {
-            (param.method as Method).invoke(null, *param.args)
-        } catch (e: Throwable) {
+            val method = param.method as Method
+            val origObs = method.invoke(param.thisObject, *param.args)!!
+            subscribeToObservable(
+                origObs,
+                onNext = { result -> subscriberOnNext(subscriber, result) },
+                onError = { error -> subscriberOnError(subscriber, error) },
+                onCompleted = { subscriberOnCompleted(subscriber) }
+            )
+        } catch (e: Exception) {
+            subscriberOnError(subscriber, e)
         } finally {
             isBypassing.set(false)
         }
+    }
+
+    fun cancelJoin(subscriber: Any) {
+        subscriberOnCompleted(subscriber)
+    }
+
+    override fun start(context: Context) {
+        try {
+            val joinGuild = RestAPI::class.java.getDeclaredMethod(
+                "joinGuild",
+                Long::class.javaPrimitiveType,
+                Boolean::class.javaPrimitiveType,
+                String::class.java,
+                java.lang.Long::class.java,
+                RestAPIParams.InviteCode::class.java,
+                String::class.java
+            )
+
+            patcher.patch(joinGuild, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (isBypassing.get()) return
+
+                    try {
+                        val guildId = param.args[0] as? Long ?: return
+
+                        param.result = createObservable { subscriber ->
+                            Utils.threadPool.execute {
+                                try {
+                                    val url = "https://discord.com/api/v9/guilds/$guildId/member-verification"
+                                    val res = Http.Request(url, "GET")
+                                        .setHeader("Authorization", authToken)
+                                        .execute()
+
+                                    if (res.statusCode in 200..299) {
+                                        val json = JSONObject(res.text())
+                                        val formFields = json.optJSONArray("form_fields")
+
+                                        if (formFields != null && formFields.length() > 0) {
+                                            val guildName = fetchGuildName(guildId)
+                                            mainHandler.post {
+                                                val manager = Utils.appActivity?.supportFragmentManager
+                                                if (manager != null) {
+                                                    val sheet = ServerApplicationSheet(
+                                                        guildId.toString(),
+                                                        guildName,
+                                                        formFields,
+                                                        subscriber,
+                                                        this@ServerApplicationFix
+                                                    )
+                                                    sheet.show(manager, "ServerApplicationSheet")
+                                                } else {
+                                                    cancelJoin(subscriber)
+                                                }
+                                            }
+                                            return@execute
+                                        }
+                                    }
+                                    triggerOriginalJoin(param, subscriber)
+                                } catch (e: Exception) {
+                                    triggerOriginalJoin(param, subscriber)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+            })
+        } catch (e: Exception) {}
     }
 
     private fun fetchGuildName(guildId: Long): String {
@@ -111,7 +185,8 @@ class ServerApplicationFix : Plugin() {
     fun submitApplication(
         guildId: String,
         guildName: String,
-        inputs: List<Pair<JSONObject, EditText>>
+        inputs: List<Pair<JSONObject, EditText>>,
+        subscriber: Any
     ) {
         Utils.threadPool.execute {
             try {
@@ -151,10 +226,12 @@ class ServerApplicationFix : Plugin() {
                         Utils.showToast("Failed to submit application")
                     }
                 }
+                cancelJoin(subscriber)
             } catch (e: Exception) {
                 mainHandler.post {
-                    Utils.showToast("An error occurred")
+                    Utils.showToast("Failed to submit application")
                 }
+                cancelJoin(subscriber)
             }
         }
     }
