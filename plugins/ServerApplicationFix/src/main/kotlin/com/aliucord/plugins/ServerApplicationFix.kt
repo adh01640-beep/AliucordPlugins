@@ -8,13 +8,10 @@ import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
-import com.discord.restapi.RestAPIParams
-import com.discord.utilities.rest.RestAPI
 import de.robv.android.xposed.XC_MethodHook
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 import java.util.concurrent.atomic.AtomicBoolean
 
 @AliucordPlugin(requiresRestart = false)
@@ -25,148 +22,78 @@ class ServerApplicationFix : Plugin() {
     }
 
     private val authToken: String
-        get() = RestAPI.AppHeadersProvider.INSTANCE.authToken
+        get() = com.discord.utilities.rest.RestAPI.AppHeadersProvider.INSTANCE.authToken
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isBypassing = AtomicBoolean(false)
 
-    private fun createObservable(onSubscribe: (Any) -> Unit): Any {
-        val onSubscribeClass = Class.forName("rx.Observable\$OnSubscribe")
-        val proxy = Proxy.newProxyInstance(onSubscribeClass.classLoader, arrayOf(onSubscribeClass)) { _, method, args ->
-            if (method.name == "call") onSubscribe(args[0])
-            null
-        }
-        return Class.forName("rx.Observable").getMethod("create", onSubscribeClass).invoke(null, proxy)!!
-    }
-
-    private fun subscriberOnNext(subscriber: Any, value: Any?) {
-        subscriber.javaClass.getMethod("onNext", Any::class.java).invoke(subscriber, value)
-    }
-
-    private fun subscriberOnError(subscriber: Any, error: Throwable) {
-        subscriber.javaClass.getMethod("onError", Throwable::class.java).invoke(subscriber, error)
-    }
-
-    private fun subscriberOnCompleted(subscriber: Any) {
-        subscriber.javaClass.getMethod("onCompleted").invoke(subscriber)
-    }
-
-    private fun subscribeToObservable(
-        observable: Any,
-        onNext: (Any?) -> Unit,
-        onError: (Throwable) -> Unit,
-        onCompleted: () -> Unit,
-    ) {
-        val action1Class = Class.forName("rx.functions.Action1")
-        val action0Class = Class.forName("rx.functions.Action0")
-
-        val onNextProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
-            if (method.name == "call") onNext(args?.getOrNull(0))
-            null
-        }
-        val onErrorProxy = Proxy.newProxyInstance(action1Class.classLoader, arrayOf(action1Class)) { _, method, args ->
-            if (method.name == "call") onError(args?.get(0) as Throwable)
-            null
-        }
-        val onCompletedProxy = Proxy.newProxyInstance(action0Class.classLoader, arrayOf(action0Class)) { _, method, _ ->
-            if (method.name == "call") onCompleted()
-            null
-        }
-
-        observable.javaClass
-            .getMethod("subscribe", action1Class, action1Class, action0Class)
-            .invoke(observable, onNextProxy, onErrorProxy, onCompletedProxy)
-    }
-
-    fun triggerOriginalJoin(param: XC_MethodHook.MethodHookParam, subscriber: Any) {
-        isBypassing.set(true)
-        try {
-            val method = param.method as Method
-            val origObs = method.invoke(param.thisObject, *param.args)!!
-            subscribeToObservable(
-                origObs,
-                onNext = { result -> subscriberOnNext(subscriber, result) },
-                onError = { error -> subscriberOnError(subscriber, error) },
-                onCompleted = { subscriberOnCompleted(subscriber) }
-            )
-        } catch (e: Exception) {
-            subscriberOnError(subscriber, e)
-        } finally {
-            isBypassing.set(false)
-        }
-    }
-
-    fun failJoin(subscriber: Any, message: String) {
-        subscriberOnError(subscriber, Exception(message))
-    }
-
     override fun start(context: Context) {
         try {
-            val joinGuild = RestAPI::class.java.getDeclaredMethod(
-                "joinGuild",
-                Long::class.javaPrimitiveType,
-                Boolean::class.javaPrimitiveType,
-                String::class.java,
-                java.lang.Long::class.java,
-                RestAPIParams.InviteCode::class.java,
-                String::class.java
-            )
+            val joinGuildMethod = Class.forName("com.discord.widgets.guilds.join.GuildJoinHelperKt")
+                .declaredMethods.firstOrNull { it.name == "joinGuild" }
 
-            patcher.patch(joinGuild, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (isBypassing.get()) return
+            if (joinGuildMethod != null) {
+                patcher.patch(joinGuildMethod, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (isBypassing.get()) return
 
-                    try {
-                        val guildId = param.args[0] as? Long ?: return
+                        val guildId = param.args[1] as? Long ?: return
+                        param.result = null
 
-                        param.result = createObservable { subscriber ->
-                            Utils.threadPool.execute {
-                                try {
-                                    val url = "https://discord.com/api/v9/guilds/$guildId/member-verification"
-                                    val res = Http.Request(url, "GET")
-                                        .setHeader("Authorization", authToken)
-                                        .execute()
+                        Utils.threadPool.execute {
+                            try {
+                                val url = "https://discord.com/api/v9/guilds/$guildId/member-verification?with_guild=false"
+                                val res = Http.Request(url, "GET")
+                                    .setHeader("Authorization", authToken)
+                                    .execute()
 
-                                    if (res.statusCode in 200..299) {
-                                        val json = JSONObject(res.text())
-                                        val formFields = json.optJSONArray("form_fields")
+                                if (res.statusCode in 200..299) {
+                                    val json = JSONObject(res.text())
+                                    val formFields = json.optJSONArray("form_fields")
 
-                                        if (formFields != null && formFields.length() > 0) {
-                                            val guildName = fetchGuildName(guildId)
-                                            mainHandler.post {
-                                                val manager = Utils.appActivity?.supportFragmentManager
-                                                if (manager != null) {
-                                                    val sheet = ServerApplicationSheet(
-                                                        guildId.toString(),
-                                                        guildName,
-                                                        formFields,
-                                                        param,
-                                                        subscriber,
-                                                        this@ServerApplicationFix
-                                                    )
-                                                    sheet.show(manager, "ServerApplicationSheet")
-                                                } else {
-                                                    failJoin(subscriber, "Failed to open the application interface")
-                                                }
+                                    if (formFields != null && formFields.length() > 0) {
+                                        val guildName = fetchGuildName(guildId)
+                                        mainHandler.post {
+                                            val manager = Utils.appActivity?.supportFragmentManager
+                                            if (manager != null) {
+                                                val sheet = ServerApplicationSheet(
+                                                    guildId.toString(),
+                                                    guildName,
+                                                    formFields,
+                                                    this@ServerApplicationFix
+                                                )
+                                                sheet.show(manager, "ServerApplicationSheet")
+                                            } else {
+                                                Utils.showToast("Cannot open application form")
                                             }
-                                            return@execute
                                         }
+                                        return@execute
                                     }
-                                    triggerOriginalJoin(param, subscriber)
+                                }
 
-                                } catch (e: Exception) {
-                                    logger.error("Verification check failed, falling back to native join", e)
-                                    triggerOriginalJoin(param, subscriber)
+                                mainHandler.post {
+                                    triggerOriginalJoin(param)
+                                }
+                            } catch (e: Exception) {
+                                mainHandler.post {
+                                    triggerOriginalJoin(param)
                                 }
                             }
                         }
-                    } catch (e: Exception) {
-                        logger.error("Hook error", e)
                     }
-                }
-            })
+                })
+            }
         } catch (e: Exception) {
-            logger.error("start", e)
+        }
+    }
+
+    private fun triggerOriginalJoin(param: XC_MethodHook.MethodHookParam) {
+        isBypassing.set(true)
+        try {
+            (param.method as Method).invoke(null, *param.args)
+        } catch (e: Throwable) {
+        } finally {
+            isBypassing.set(false)
         }
     }
 
@@ -175,18 +102,16 @@ class ServerApplicationFix : Plugin() {
             val res = Http.Request("https://discord.com/api/v9/guilds/$guildId/preview", "GET")
                 .setHeader("Authorization", authToken)
                 .execute()
-            if (res.statusCode in 200..299) JSONObject(res.text()).optString("name", "Unknown Server") else "Unknown Server"
+            if (res.statusCode in 200..299) JSONObject(res.text()).optString("name", "Server") else "Server"
         } catch (e: Exception) {
-            "Unknown Server"
+            "Server"
         }
     }
 
     fun submitApplication(
         guildId: String,
         guildName: String,
-        inputs: List<Pair<JSONObject, EditText>>,
-        param: XC_MethodHook.MethodHookParam,
-        subscriber: Any
+        inputs: List<Pair<JSONObject, EditText>>
     ) {
         Utils.threadPool.execute {
             try {
@@ -206,7 +131,6 @@ class ServerApplicationFix : Plugin() {
                 }
 
                 val url = "https://discord.com/api/v9/guilds/$guildId/requests/@me"
-                
                 var res = Http.Request(url, "PUT")
                     .setHeader("Authorization", authToken)
                     .setHeader("Content-Type", "application/json")
@@ -219,14 +143,18 @@ class ServerApplicationFix : Plugin() {
                         .executeWithJson(body)
                 }
 
-                if (res.statusCode in 200..299) {
-                    trackApplication(guildId, guildName)
-                    failJoin(subscriber, "Application Submitted successfully to $guildName. Check settings for approval status.")
-                } else {
-                    failJoin(subscriber, "Application submission failed: HTTP ${res.statusCode}")
+                mainHandler.post {
+                    if (res.statusCode in 200..299) {
+                        trackApplication(guildId, guildName)
+                        Utils.showToast("Application submitted successfully")
+                    } else {
+                        Utils.showToast("Failed to submit application")
+                    }
                 }
             } catch (e: Exception) {
-                failJoin(subscriber, e.message ?: "Unknown error")
+                mainHandler.post {
+                    Utils.showToast("An error occurred")
+                }
             }
         }
     }
@@ -244,9 +172,7 @@ class ServerApplicationFix : Plugin() {
                 put("name", guildName)
             })
             settings.setString("applications", updated.toString())
-        } catch (e: Exception) {
-            logger.error("trackApplication", e)
-        }
+        } catch (e: Exception) {}
     }
 
     fun getTrackedApplications(): List<Pair<String, String>> {
@@ -267,7 +193,7 @@ class ServerApplicationFix : Plugin() {
                 .setHeader("Authorization", authToken)
                 .execute()
 
-            if (!res.ok()) return "Unknown (HTTP ${res.statusCode})"
+            if (!res.ok()) return "Unknown"
 
             val json = JSONObject(res.text())
             when (json.optString("status").uppercase()) {
@@ -277,7 +203,7 @@ class ServerApplicationFix : Plugin() {
                 else -> json.optString("status").ifBlank { "Unknown" }
             }
         } catch (e: Exception) {
-            "Error checking status"
+            "Unknown"
         }
     }
 
