@@ -8,7 +8,7 @@ import de.robv.android.xposed.XC_MethodHook
 import java.lang.reflect.Method
 
 @AliucordPlugin
-class MentionDedupeFix : Plugin() {
+class AutocompleteFix : Plugin() {
 
     companion object {
         private val LOG = Logger("AutocompleteFix")
