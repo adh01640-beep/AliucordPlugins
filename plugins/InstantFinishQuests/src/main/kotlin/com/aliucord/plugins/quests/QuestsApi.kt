@@ -69,7 +69,7 @@ object QuestsApi {
                 } else null
             }
             
-            val message = if (challenge != null) "Captcha required" else error?.message ?: "HTTP ${response.statusCode}"
+            val message = if (challenge != null) "Discord requires a captcha" else error?.message ?: "Discord returned HTTP ${response.statusCode}"
             throw QuestApiException(response.statusCode, challenge, message)
         }
         response.json(GsonUtils.gsonRestApi, T::class.java)
