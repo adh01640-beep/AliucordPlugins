@@ -7,12 +7,13 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.content.res.ResourcesCompat
+import com.aliucord.Constants
 import com.aliucord.Utils
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.utils.DimenUtils
 import com.aliucord.utils.RxUtils.subscribe
 import com.discord.utilities.captcha.CaptchaHelper
-import com.lytefast.flexinput.R
 import rx.Subscriber
 
 class CollectiblesPage : SettingsPage() {
@@ -93,7 +94,7 @@ class CollectiblesPage : SettingsPage() {
             text = quest.config.messages.questName
             setTextColor(Color.WHITE)
             textSize = 18f
-            typeface = androidx.core.content.res.ResourcesCompat.getFont(context, com.aliucord.Constants.Fonts.whitney_semibold)
+            typeface = ResourcesCompat.getFont(context, Constants.Fonts.whitney_semibold)
         }
         card.addView(title)
 
@@ -132,7 +133,7 @@ class CollectiblesPage : SettingsPage() {
     private fun performClaim(button: TextView, quest: Quest, captchaSolution: QuestCaptchaSolution?) {
         button.isEnabled = false
         button.alpha = 0.5f
-        button.text = if (captchaSolution == null) "Claiming..." else "Verifying Captcha..."
+        button.text = if (captchaSolution == null) "Claiming..." else "Verifying..."
 
         Utils.threadPool.execute {
             try {
@@ -143,7 +144,6 @@ class CollectiblesPage : SettingsPage() {
                         setColor(Color.parseColor("#4F545C"))
                         cornerRadius = DimenUtils.dpToPx(4).toFloat()
                     }
-                    Utils.showToast("Reward successfully claimed")
                 }
             } catch (e: Exception) {
                 val challenge = (e as? QuestApiException)?.captchaChallenge
