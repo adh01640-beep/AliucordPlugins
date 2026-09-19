@@ -12,6 +12,7 @@ import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.plugins.quests.CollectiblesPage
 import com.aliucord.plugins.quests.QuestManager
+import com.aliucord.plugins.quests.QuestProgressPage
 import com.discord.widgets.settings.WidgetSettings
 import com.lytefast.flexinput.R
 
@@ -51,6 +52,20 @@ class InstantFinishQuests : Plugin() {
                     }
                     layout.addView(instantFinishBtn, baseIndex + 1)
 
+                    val progressBtn = TextView(ctx, null, 0, R.i.UiKit_Settings_Item_Icon).apply {
+                        text = "Quest Progress"
+                        val iconId = Utils.getResId("ic_history_24dp", "drawable")
+                        val drawable = if (iconId != 0) ctx.getDrawable(iconId) else ctx.getDrawable(R.e.ic_info_24dp)
+                        setCompoundDrawablesWithIntrinsicBounds(
+                            Utils.tintToTheme(drawable),
+                            null, null, null
+                        )
+                        setOnClickListener {
+                            Utils.openPageWithProxy(ctx, QuestProgressPage())
+                        }
+                    }
+                    layout.addView(progressBtn, baseIndex + 2)
+
                     val collectiblesBtn = TextView(ctx, null, 0, R.i.UiKit_Settings_Item_Icon).apply {
                         text = "Collectibles"
                         setCompoundDrawablesWithIntrinsicBounds(
@@ -61,7 +76,7 @@ class InstantFinishQuests : Plugin() {
                             Utils.openPageWithProxy(ctx, CollectiblesPage())
                         }
                     }
-                    layout.addView(collectiblesBtn, baseIndex + 2)
+                    layout.addView(collectiblesBtn, baseIndex + 3)
 
                 } catch (e: Exception) {}
             }
