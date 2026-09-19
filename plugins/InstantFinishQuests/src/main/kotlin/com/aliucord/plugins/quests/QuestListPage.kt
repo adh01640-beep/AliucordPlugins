@@ -6,6 +6,7 @@ import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.content.res.ResourcesCompat
 import com.aliucord.Constants
@@ -97,9 +98,53 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
             setTextColor(Color.WHITE)
             textSize = 18f
             typeface = ResourcesCompat.getFont(context, Constants.Fonts.whitney_semibold)
-            setPadding(0, 0, 0, DimenUtils.dpToPx(12))
         }
         card.addView(title)
+
+        val task = (quest.config.taskConfigV2 ?: quest.config.taskConfig)?.tasks?.values?.firstOrNull()
+        val target = task?.target ?: 1
+        val progressValue = quest.userStatus?.progress?.values?.firstOrNull()?.value ?: 0
+
+        val statusStr = when {
+            quest.userStatus?.completedAt != null -> "Completed"
+            quest.userStatus?.enrolledAt != null -> "In Progress"
+            else -> "Available"
+        }
+
+        val statusColor = when {
+            quest.userStatus?.completedAt != null -> "#57F287"
+            quest.userStatus?.enrolledAt != null -> "#5865F2"
+            else -> "#B9BBBE"
+        }
+
+        val statusText = TextView(context).apply {
+            text = "Status: $statusStr"
+            setTextColor(Color.parseColor(statusColor))
+            textSize = 14f
+            setPadding(0, DimenUtils.dpToPx(8), 0, DimenUtils.dpToPx(4))
+        }
+        card.addView(statusText)
+
+        val progressText = TextView(context).apply {
+            text = "Progress: $progressValue / $target"
+            setTextColor(Color.parseColor("#B9BBBE"))
+            textSize = 14f
+            setPadding(0, 0, 0, DimenUtils.dpToPx(8))
+        }
+        card.addView(progressText)
+
+        val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                DimenUtils.dpToPx(12)
+            ).apply {
+                setMargins(0, 0, 0, DimenUtils.dpToPx(16))
+            }
+            max = target
+            progress = progressValue
+            progressDrawable.setColorFilter(Color.parseColor(statusColor), android.graphics.PorterDuff.Mode.SRC_IN)
+        }
+        card.addView(progressBar)
 
         val finishBtn = TextView(context).apply {
             text = "Instantly finish this quest"
@@ -123,16 +168,16 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
             finishBtn.text = "Finishing..."
 
             Utils.threadPool.execute {
-                val success = QuestManager.finishSingleQuest(quest, settings)
+                val result = QuestManager.finishSingleQuest(quest, settings)
                 Utils.mainThread.post {
-                    if (success) {
-                        finishBtn.text = "Finished"
+                    if (result.first) {
+                        finishBtn.text = result.second
                         finishBtn.background = GradientDrawable().apply {
                             setColor(Color.parseColor("#4F545C"))
                             cornerRadius = DimenUtils.dpToPx(4).toFloat()
                         }
                     } else {
-                        finishBtn.text = "Failed - Check Settings"
+                        finishBtn.text = result.second
                         finishBtn.background = GradientDrawable().apply {
                             setColor(Color.parseColor("#ED4245"))
                             cornerRadius = DimenUtils.dpToPx(4).toFloat()
