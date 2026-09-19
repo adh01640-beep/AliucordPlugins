@@ -15,7 +15,7 @@ object QuestManager {
         scheduler = Executors.newSingleThreadScheduledExecutor()
         scheduler?.scheduleWithFixedDelay({
             if (settings.getBool("auto_finish", false)) {
-                processQuests(settings)
+                processAllAvailableQuests(settings)
             }
         }, 10, 3600, TimeUnit.SECONDS)
     }
@@ -27,7 +27,7 @@ object QuestManager {
         } catch (e: Exception) {}
     }
 
-    fun processQuests(settings: SettingsAPI) {
+    private fun processAllAvailableQuests(settings: SettingsAPI) {
         Utils.threadPool.execute {
             try {
                 val response = QuestsApi.getQuests()
@@ -39,16 +39,16 @@ object QuestManager {
                 }
 
                 for (quest in validQuests) {
-                    processSingleQuest(quest, settings)
+                    finishSingleQuest(quest, settings)
                     Thread.sleep(2000)
                 }
             } catch (e: Exception) {}
         }
     }
 
-    private fun processSingleQuest(quest: Quest, settings: SettingsAPI) {
-        try {
-            val tasks = (quest.config.taskConfigV2 ?: quest.config.taskConfig)?.tasks ?: return
+    fun finishSingleQuest(quest: Quest, settings: SettingsAPI): Boolean {
+        return try {
+            val tasks = (quest.config.taskConfigV2 ?: quest.config.taskConfig)?.tasks ?: return false
             val isStreamTask = tasks.keys.any { it.contains("STREAM") || it.contains("PLAY") }
             val isVideoTask = tasks.keys.any { it.contains("VIDEO") }
 
@@ -57,35 +57,30 @@ object QuestManager {
                 val voiceId = settings.getString("voice_id", "")
                 val serverId = settings.getString("server_id", "")
                 
-                if (altToken.isBlank() || voiceId.isBlank() || serverId.isBlank()) {
-                    return
+                if (altToken.isNotBlank() && voiceId.isNotBlank() && serverId.isNotBlank()) {
+                    try { QuestsApi.enroll(quest) } catch (e: Exception) {}
+                    try { QuestsApi.enroll(quest, altToken) } catch (e: Exception) {}
+                    true
+                } else {
+                    false
                 }
-
-                try {
-                    QuestsApi.enroll(quest)
-                } catch (e: Exception) {}
-
-                try {
-                    QuestsApi.enroll(quest, altToken)
-                } catch (e: Exception) {}
-
             } else if (isVideoTask) {
-                try {
-                    if (quest.userStatus?.enrolledAt == null) {
-                        QuestsApi.enroll(quest)
-                    }
-                    val videoTask = tasks.values.firstOrNull { it.target > 0 }
-                    if (videoTask != null) {
-                        QuestsApi.reportVideoProgress(quest.id, videoTask.target.toDouble())
-                    }
-                } catch (e: Exception) {}
+                if (quest.userStatus?.enrolledAt == null) {
+                    try { QuestsApi.enroll(quest) } catch (e: Exception) {}
+                }
+                val videoTask = tasks.values.firstOrNull { it.target > 0 }
+                if (videoTask != null) {
+                    QuestsApi.reportVideoProgress(quest.id, videoTask.target.toDouble())
+                }
+                true
             } else {
-                try {
-                    if (quest.userStatus?.enrolledAt == null) {
-                        QuestsApi.enroll(quest)
-                    }
-                } catch (e: Exception) {}
+                if (quest.userStatus?.enrolledAt == null) {
+                    try { QuestsApi.enroll(quest) } catch (e: Exception) {}
+                }
+                true
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            false
+        }
     }
 }
