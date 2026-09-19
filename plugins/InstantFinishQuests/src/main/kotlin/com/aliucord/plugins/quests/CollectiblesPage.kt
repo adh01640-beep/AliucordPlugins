@@ -144,6 +144,7 @@ class CollectiblesPage : SettingsPage() {
                         setColor(Color.parseColor("#4F545C"))
                         cornerRadius = DimenUtils.dpToPx(4).toFloat()
                     }
+                    Utils.showToast("Reward successfully claimed")
                 }
             } catch (e: Exception) {
                 val challenge = (e as? QuestApiException)?.captchaChallenge
@@ -168,6 +169,7 @@ class CollectiblesPage : SettingsPage() {
                                     button.isEnabled = true
                                     button.alpha = 1f
                                     button.text = "Claim Reward"
+                                    Utils.showToast("Captcha verification failed")
                                 }
                                 override fun onCompleted() {}
                             }
@@ -178,6 +180,8 @@ class CollectiblesPage : SettingsPage() {
                         button.isEnabled = true
                         button.alpha = 1f
                         button.text = "Claim Reward"
+                        val errorMessage = (e as? QuestApiException)?.message ?: "Unable to claim reward"
+                        Utils.showToast(errorMessage)
                     }
                 }
             }
