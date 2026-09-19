@@ -135,6 +135,3 @@ class QuestApiException(
     val captchaRequired: Boolean
         get() = captchaChallenge != null
 }
-
-fun questAssetUrl(asset: String): String =
-    if (asset.startsWith("http")) asset else "https://cdn.discordapp.com/${asset.removePrefix("/")}"
