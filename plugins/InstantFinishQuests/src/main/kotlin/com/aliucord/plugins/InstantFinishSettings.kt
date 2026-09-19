@@ -1,5 +1,6 @@
 package com.aliucord.plugins
 
+import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
 import android.text.Editable
@@ -10,7 +11,7 @@ import android.widget.TextView
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
 import com.aliucord.fragments.SettingsPage
-import com.aliucord.views.Button
+import com.aliucord.utils.DimenUtils
 import com.discord.views.CheckedSetting
 
 class InstantFinishSettings(private val settings: SettingsAPI) : SettingsPage() {
@@ -31,7 +32,7 @@ class InstantFinishSettings(private val settings: SettingsAPI) : SettingsPage() 
             text = "Stream Quests Bypass Configuration"
             setTextColor(Color.WHITE)
             textSize = 16f
-            setPadding(Utils.dpToPx(16), Utils.dpToPx(16), Utils.dpToPx(16), Utils.dpToPx(8))
+            setPadding(DimenUtils.dpToPx(16), DimenUtils.dpToPx(16), DimenUtils.dpToPx(16), DimenUtils.dpToPx(8))
         }
         linearLayout.addView(streamHeader)
 
@@ -40,13 +41,13 @@ class InstantFinishSettings(private val settings: SettingsAPI) : SettingsPage() 
         linearLayout.addView(createInput(ctx, "Alt Account Token", "alt_token"))
     }
 
-    private fun createInput(ctx: android.content.Context, hintText: String, key: String): EditText {
+    private fun createInput(ctx: Context, hintText: String, key: String): EditText {
         return EditText(ctx).apply {
             setTextColor(Color.WHITE)
             setHintTextColor(Color.parseColor("#72767D"))
             hint = hintText
             setText(settings.getString(key, ""))
-            setPadding(Utils.dpToPx(16), Utils.dpToPx(16), Utils.dpToPx(16), Utils.dpToPx(16))
+            setPadding(DimenUtils.dpToPx(16), DimenUtils.dpToPx(16), DimenUtils.dpToPx(16), DimenUtils.dpToPx(16))
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
