@@ -40,47 +40,61 @@ object QuestManager {
 
                 for (quest in validQuests) {
                     finishSingleQuest(quest, settings)
-                    Thread.sleep(2000)
+                    Thread.sleep((8000L..12000L).random())
                 }
             } catch (e: Exception) {}
         }
     }
 
-    fun finishSingleQuest(quest: Quest, settings: SettingsAPI): Boolean {
+    fun finishSingleQuest(quest: Quest, settings: SettingsAPI): Pair<Boolean, String> {
         return try {
-            val tasks = (quest.config.taskConfigV2 ?: quest.config.taskConfig)?.tasks ?: return false
-            val isStreamTask = tasks.keys.any { it.contains("STREAM") || it.contains("PLAY") }
-            val isVideoTask = tasks.keys.any { it.contains("VIDEO") }
+            val tasks = (quest.config.taskConfigV2 ?: quest.config.taskConfig)?.tasks ?: return Pair(false, "Quest data unavailable")
+            val taskKey = tasks.keys.firstOrNull() ?: return Pair(false, "Unknown quest type")
+            val task = tasks[taskKey] ?: return Pair(false, "Task data unavailable")
 
-            if (isStreamTask) {
+            if (taskKey.contains("STREAM") || taskKey.contains("PLAY")) {
                 val altToken = settings.getString("alt_token", "")
                 val voiceId = settings.getString("voice_id", "")
                 val serverId = settings.getString("server_id", "")
                 
-                if (altToken.isNotBlank() && voiceId.isNotBlank() && serverId.isNotBlank()) {
-                    try { QuestsApi.enroll(quest) } catch (e: Exception) {}
-                    try { QuestsApi.enroll(quest, altToken) } catch (e: Exception) {}
-                    true
-                } else {
-                    false
+                if (altToken.isBlank() || voiceId.isBlank() || serverId.isBlank()) {
+                    return Pair(false, "Stream settings missing")
                 }
-            } else if (isVideoTask) {
+                try { QuestsApi.enroll(quest) } catch (e: Exception) {}
+                try { QuestsApi.enroll(quest, altToken) } catch (e: Exception) {}
+                Pair(true, "Quest started successfully")
+                
+            } else if (taskKey.contains("VIDEO")) {
                 if (quest.userStatus?.enrolledAt == null) {
                     try { QuestsApi.enroll(quest) } catch (e: Exception) {}
                 }
-                val videoTask = tasks.values.firstOrNull { it.target > 0 }
-                if (videoTask != null) {
-                    QuestsApi.reportVideoProgress(quest.id, videoTask.target.toDouble())
+                
+                Utils.threadPool.execute {
+                    try {
+                        var currentProgress = quest.userStatus?.progress?.get(taskKey)?.value?.toDouble() ?: 0.0
+                        val target = task.target.toDouble()
+                        
+                        while (currentProgress < target) {
+                            currentProgress += (5..7).random().toDouble()
+                            if (currentProgress > target) currentProgress = target
+                            
+                            val updated = QuestsApi.reportVideoProgress(quest.id, currentProgress)
+                            if (updated.completedAt != null) break
+                            
+                            Thread.sleep((7000L..8500L).random())
+                        }
+                    } catch (e: Exception) {}
                 }
-                true
+                Pair(true, "Processing safely in background")
+                
             } else {
                 if (quest.userStatus?.enrolledAt == null) {
                     try { QuestsApi.enroll(quest) } catch (e: Exception) {}
                 }
-                true
+                Pair(true, "Quest enrolled successfully")
             }
         } catch (e: Exception) {
-            false
+            Pair(false, "Could not process quest")
         }
     }
 }
